@@ -1,0 +1,49 @@
+project:
+  name: hci-rag-eval
+  description: "HCI literature retrieval and generation evaluation"
+
+manual_queries:
+  - "How can interactive systems support reflective learning and long-term behavior change in everyday digital work?"
+  - "What design patterns improve trust calibration in human-AI collaboration for high-stakes decisions?"
+  - "How do accessible interfaces and inclusive participatory design improve digital service engagement across diverse users?"
+  - "What evidence suggests that subtle friction can improve habit formation and sustainable digital routines?"
+  - "How can AI systems support shared mental models and team coordination in collaborative work?"
+  - "What features make decision-support tools understandable and actionable for expert users?"
+  - "How do multimodal feedback and adaptive interfaces improve user experience in complex task environments?"
+  - "What design principles support transparent and accountable AI-assisted workflows in professional settings?"
+  - "How can HCI research methods help evaluate long-term adoption and behavior change in digital products?"
+  - "What are the most promising directions for trustworthy, human-centered generative AI interfaces in knowledge work?"
+
+data:
+  raw_path: "data/raw/abstracts.jsonl"
+  sample_path: "data/raw/sample_abstracts.jsonl"
+  embeddings_path: "data/embeddings.npy"
+  embedding_ids_path: "data/embeddings_ids.json"
+  max_papers: 100
+  queries: 10
+
+retrieval:
+  model_name: "all-MiniLM-L6-v2"
+  top_k: 5
+  similarity_metric: "cosine"
+
+generation:
+  model_name: "claude-sonnet-4-6"
+  temperature: 0.7
+  reruns: 5
+  max_tokens: 800
+
+evaluation:
+  validity:
+    method: "heuristic_plus_llm_judge"
+  reliability:
+    method: "semantic_consistency_plus_confidence_variance"
+    claim_match_threshold: 0.8
+  actionability:
+    rubric_min: 1
+    rubric_max: 5
+
+report:
+  results_csv: "outputs/results.csv"
+  report_md: "outputs/report.md"
+  chart_path: "outputs/retrieval_vs_grounding.png"
