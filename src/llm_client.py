@@ -19,6 +19,11 @@ _API_CALL_COUNT = 0
 _WARNED_AT_LIMIT = False
 _INPUT_TOKENS = 0
 _OUTPUT_TOKENS = 0
+_STAGE_CALL_COUNTS = {
+    "generation": 0,
+    "validity": 0,
+    "actionability": 0,
+}
 
 
 def _get_runtime_config() -> dict[str, Any]:
@@ -83,10 +88,16 @@ def reset_api_usage() -> None:
     _WARNED_AT_LIMIT = False
     _INPUT_TOKENS = 0
     _OUTPUT_TOKENS = 0
+    for key in _STAGE_CALL_COUNTS:
+        _STAGE_CALL_COUNTS[key] = 0
 
 
 def get_api_call_count() -> int:
     return _API_CALL_COUNT
+
+
+def get_stage_call_counts() -> dict[str, int]:
+    return dict(_STAGE_CALL_COUNTS)
 
 
 def get_token_usage() -> tuple[int, int]:
@@ -143,6 +154,20 @@ def make_cache_key(model: str, prompt: str, temperature: float, run_index: int) 
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "model_dump"):
+        return _json_safe(value.model_dump())
+    if hasattr(value, "dict") and callable(value.dict):
+        return _json_safe(value.dict())
+    if hasattr(value, "__dict__"):
+        return {str(key): _json_safe(item) for key, item in vars(value).items()}
+    return value
+
+
 def _cache_file_for_key(cache_key: str) -> Path:
     cache_dir = _resolve_cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -169,12 +194,13 @@ def save_to_cache(model: str, prompt: str, temperature: float, run_index: int, p
         return
     cache_key = make_cache_key(model, prompt, temperature, run_index)
     path = _cache_file_for_key(cache_key)
-    path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    path.write_text(json.dumps(_json_safe(payload), ensure_ascii=False, sort_keys=True), encoding="utf-8")
 
 
 def _anthropic_call(model: str, prompt: str, temperature: float, max_tokens: int = 800) -> dict[str, Any]:
     try:
         from anthropic import Anthropic
+        import inspect
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("The 'anthropic' package is not installed. Please install project dependencies before running the pipeline.") from exc
 
@@ -183,12 +209,17 @@ def _anthropic_call(model: str, prompt: str, temperature: float, max_tokens: int
         raise RuntimeError("ANTHROPIC_API_KEY is not set. Please set it in .env: ANTHROPIC_API_KEY=sk-ant-...")
 
     client = Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    request_kwargs = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    try:
+        if "temperature" in inspect.signature(client.messages.create).parameters:
+            request_kwargs["temperature"] = temperature
+    except Exception:
+        pass
+    response = client.messages.create(**request_kwargs)
 
     content_blocks = getattr(response, "content", []) if not isinstance(response, dict) else response.get("content", [])
     text_parts: list[str] = []
@@ -203,8 +234,9 @@ def _anthropic_call(model: str, prompt: str, temperature: float, max_tokens: int
     raw_text = "".join(text_parts)
 
     usage = getattr(response, "usage", None) if not isinstance(response, dict) else response.get("usage", {})
-    _accumulate_tokens(usage)
-    return {"content": raw_text, "usage": usage}
+    usage_json = _json_safe(usage)
+    _accumulate_tokens(usage_json)
+    return {"content": raw_text, "usage": usage_json}
 
 
 def call_model(
@@ -216,6 +248,7 @@ def call_model(
     max_tokens: int = 800,
     cache_enabled: bool | None = None,
     api_fn: Callable[..., Any] | None = None,
+    stage: str = "generation",
 ) -> Any:
     runtime = _get_runtime_config()
     if cache_enabled is None:
@@ -231,6 +264,8 @@ def call_model(
         try:
             global _API_CALL_COUNT
             _API_CALL_COUNT += 1
+            if stage in _STAGE_CALL_COUNTS:
+                _STAGE_CALL_COUNTS[stage] += 1
             _warn_if_needed()
             _check_budget()
             response = effective_api_fn(model=model, prompt=prompt, temperature=temperature, max_tokens=max_tokens)

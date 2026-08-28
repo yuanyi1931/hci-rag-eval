@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from src.config import load_config
+from src.llm_client import call_model
 
 
 def heuristic_actionability(text: str) -> int:
@@ -63,11 +64,21 @@ def _extract_insight_texts(output: dict[str, Any]) -> list[str]:
 def _get_judge_n_votes() -> int:
     config = load_config()
     evaluation_cfg = config.get("evaluation", {}) if isinstance(config, dict) else {}
+    budget_cfg = config.get("budget", {}) if isinstance(config, dict) else {}
     value = evaluation_cfg.get("judge_n_votes", 3)
     try:
-        return max(1, int(value))
+        configured_votes = max(1, int(value))
     except (TypeError, ValueError):
-        return 3
+        configured_votes = 3
+
+    try:
+        max_api_calls = max(1, int(budget_cfg.get("max_api_calls", 100)))
+    except (TypeError, ValueError):
+        max_api_calls = 100
+
+    if max_api_calls < 100:
+        return 1
+    return configured_votes
 
 
 def _normalize_actionability_vote(value: Any) -> int:
@@ -99,6 +110,33 @@ def _majority_score(votes: list[int]) -> tuple[int, float]:
     return majority_value, majority_count / len(votes)
 
 
+def _llm_actionability_vote(text: str, vote_index: int) -> int:
+    config = load_config()
+    evaluation_cfg = config.get("evaluation", {}) if isinstance(config, dict) else {}
+    model_name = str(evaluation_cfg.get("judge_model", "claude-sonnet-4-6"))
+    temperature = float(evaluation_cfg.get("judge_temperature", 0.0))
+    prompt = (
+        "Score the following insight text on actionability for a research or product decision.\n"
+        "Return exactly one integer from 1 to 5, where:\n"
+        "1 = purely descriptive; 2 = vague direction; 3 = identifiable direction; 4 = actionable decision; 5 = very operational with clear next steps.\n\n"
+        f"Insight text:\n{text[:4000]}\n\nInteger score:"
+    )
+    deterministic_seed = abs(sum((idx + 1) * ord(ch) for idx, ch in enumerate(f"{text[:128]}|vote={vote_index}"))) % 1_000_000_000
+    response = call_model(
+        model=model_name,
+        prompt=prompt,
+        temperature=temperature,
+        run_index=deterministic_seed,
+        max_tokens=32,
+        stage="actionability",
+    )
+    content = response.get("content", "") if isinstance(response, dict) else str(response)
+    numeric = re.findall(r"\d+", content)
+    if not numeric:
+        return 3
+    return _normalize_actionability_vote(int(numeric[0]))
+
+
 def _judge_actionability_item(
     text: str,
     judge_fn: Any | None = None,
@@ -107,8 +145,8 @@ def _judge_actionability_item(
     vote_count = _get_judge_n_votes() if n_votes is None else max(1, int(n_votes))
     votes: list[int] = []
     if judge_fn is None:
-        for _ in range(vote_count):
-            votes.append(heuristic_actionability(text))
+        for vote_index in range(vote_count):
+            votes.append(_llm_actionability_vote(text, vote_index=vote_index))
     else:
         for _ in range(vote_count):
             vote = judge_fn(text=text)

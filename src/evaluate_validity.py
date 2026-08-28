@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from statistics import mean
 from typing import Any
 
 from src.config import load_config
+from src.llm_client import call_model
 
 
 def split_claims(text: str) -> list[str]:
@@ -47,11 +49,21 @@ def _keyword_overlap(claim: str, source_text: str) -> bool:
 def _get_judge_n_votes() -> int:
     config = load_config()
     evaluation_cfg = config.get("evaluation", {}) if isinstance(config, dict) else {}
+    budget_cfg = config.get("budget", {}) if isinstance(config, dict) else {}
     value = evaluation_cfg.get("judge_n_votes", 3)
     try:
-        return max(1, int(value))
+        configured_votes = max(1, int(value))
     except (TypeError, ValueError):
-        return 3
+        configured_votes = 3
+
+    try:
+        max_api_calls = max(1, int(budget_cfg.get("max_api_calls", 100)))
+    except (TypeError, ValueError):
+        max_api_calls = 100
+
+    if max_api_calls < 100:
+        return 1
+    return configured_votes
 
 
 def _normalize_validity_vote(value: Any) -> str:
@@ -80,6 +92,29 @@ def _majority_vote(votes: list[str]) -> tuple[str, float]:
     return majority_label, majority_count / len(votes)
 
 
+def _llm_validity_vote(claim: str, source_text: str, vote_index: int) -> str:
+    config = load_config()
+    evaluation_cfg = config.get("evaluation", {}) if isinstance(config, dict) else {}
+    model_name = str(evaluation_cfg.get("judge_model", "claude-sonnet-4-6"))
+    temperature = float(evaluation_cfg.get("judge_temperature", 0.0))
+    prompt = (
+        "You are evaluating whether a claim is entailed by the source text.\n"
+        "Return only one of the exact labels: entailed, not_entailed, or contradicted.\n\n"
+        f"Claim: {claim}\n\nSource text:\n{source_text[:4000]}\n\nAnswer:"
+    )
+    deterministic_seed = abs(sum((idx + 1) * ord(ch) for idx, ch in enumerate(f"{claim[:128]}|{source_text[:128]}|vote={vote_index}"))) % 1_000_000_000
+    response = call_model(
+        model=model_name,
+        prompt=prompt,
+        temperature=temperature,
+        run_index=deterministic_seed,
+        max_tokens=64,
+        stage="validity",
+    )
+    text = response.get("content", "") if isinstance(response, dict) else str(response)
+    return _normalize_validity_vote(text.strip().lower().replace("\n", " ").split()[0])
+
+
 def _judge_validity_claim(
     claim: str,
     source_text: str,
@@ -89,8 +124,8 @@ def _judge_validity_claim(
     vote_count = _get_judge_n_votes() if n_votes is None else max(1, int(n_votes))
     votes: list[str] = []
     if judge_fn is None:
-        for _ in range(vote_count):
-            vote = "entailed" if _keyword_overlap(claim, source_text) else "not_entailed"
+        for vote_index in range(vote_count):
+            vote = _llm_validity_vote(claim, source_text, vote_index=vote_index)
             votes.append(_normalize_validity_vote(vote))
     else:
         for _ in range(vote_count):
@@ -121,10 +156,18 @@ def evaluate_validity(
     supported_claims = 0
     details = []
     consistency_values: list[float] = []
+    citation_rates: list[float] = []
+    retrieved_ids = {str(doc.get("id") or doc.get("paper_id") or "") for doc in retrieved_docs}
 
     for output in generated_outputs:
         for claim, support_ids in _extract_claims(output):
             total_claims += 1
+            citation_rate = 1.0
+            if support_ids:
+                valid_citations = sum(1 for paper_id in support_ids if str(paper_id) in retrieved_ids)
+                citation_rate = valid_citations / len(support_ids)
+            citation_rates.append(citation_rate)
+
             support_docs = []
             for doc in retrieved_docs:
                 doc_id = str(doc.get("id") or doc.get("paper_id") or "")
@@ -149,6 +192,7 @@ def evaluate_validity(
                     "claim": claim,
                     "supported": supported,
                     "supporting_paper_ids": support_ids,
+                    "citation_validity_rate": citation_rate,
                     "votes": judge_result["votes"],
                     "majority_vote": judge_result["majority_vote"],
                     "judge_consistency": judge_result["judge_consistency"],
@@ -157,8 +201,10 @@ def evaluate_validity(
 
     grounding_rate = (supported_claims / total_claims) if total_claims else 0.0
     judge_consistency_mean = float(sum(consistency_values) / len(consistency_values)) if consistency_values else 0.0
+    citation_validity_rate = float(mean(citation_rates)) if citation_rates else 1.0
     return {
         "grounding_rate": grounding_rate,
+        "citation_validity_rate": citation_validity_rate,
         "supported_claims": supported_claims,
         "total_claims": total_claims,
         "judge_consistency_mean": judge_consistency_mean,

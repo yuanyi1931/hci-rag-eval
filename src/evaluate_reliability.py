@@ -7,11 +7,13 @@ from typing import Any, Iterable
 import numpy as np
 import yaml
 from sentence_transformers import SentenceTransformer
+import logging
 
 from src import stats
 from src.config import load_config
 
 _MODEL_CACHE: dict[str, SentenceTransformer] = {}
+logger = logging.getLogger(__name__)
 
 
 def _get_model(model_name: str = "all-MiniLM-L6-v2") -> SentenceTransformer:
@@ -70,6 +72,12 @@ def _pair_claim_jaccard(left: list[str], right: list[str], threshold: float, mod
     Maximum-weight matching would be more globally optimal but also more complex and harder to
     reason about operationally in a reliability report.
     """
+    logger.debug("_pair_claim_jaccard left_len=%d right_len=%d threshold=%s", len(left), len(right), threshold)
+    if left:
+        logger.debug("_pair_claim_jaccard left[0]=%r", left[0][:50])
+    if right:
+        logger.debug("_pair_claim_jaccard right[0]=%r", right[0][:50])
+
     if not left and not right:
         return 1.0
     if not left or not right:
@@ -81,6 +89,18 @@ def _pair_claim_jaccard(left: list[str], right: list[str], threshold: float, mod
     n_left = len(left)
     n_right = len(right)
     pairwise = similarity[:n_left, n_left:]
+
+    # debug: print pairwise matrix and counts above threshold
+    try:
+        logger.debug("_pair_claim_jaccard pairwise matrix:\n%s", np.array2string(pairwise, precision=6, separator=", "))
+    except Exception:
+        logger.debug("_pair_claim_jaccard (could not format matrix)")
+    for t_check in (threshold, 0.6, 0.7, 0.8):
+        try:
+            cnt = int((pairwise >= t_check).sum())
+        except Exception:
+            cnt = None
+        logger.debug("_pair_claim_jaccard pairs >= %s: %s", t_check, cnt)
 
     matched_left: set[int] = set()
     matched_right: set[int] = set()
@@ -112,7 +132,11 @@ def _pair_claim_jaccard(left: list[str], right: list[str], threshold: float, mod
         if j not in matched_right:
             canonical_right.append(f"right_{j}")
 
-    return stats.jaccard_similarity(canonical_left, canonical_right)
+    logger.debug("_pair_claim_jaccard canonical_left=%s", canonical_left)
+    logger.debug("_pair_claim_jaccard canonical_right=%s", canonical_right)
+    j = stats.jaccard_similarity(canonical_left, canonical_right)
+    logger.debug("_pair_claim_jaccard jaccard=%s", j)
+    return j
 
 
 def _semantic_consistency(valid_records: list[dict[str, Any]], model_name: str = "all-MiniLM-L6-v2") -> float | None:
@@ -132,6 +156,10 @@ def _semantic_consistency(valid_records: list[dict[str, Any]], model_name: str =
 
 def _claim_overlap(valid_records: list[dict[str, Any]], threshold: float, model_name: str = "all-MiniLM-L6-v2") -> float | None:
     claim_sets = [_extract_claims(record.get("parsed_json")) for record in valid_records]
+    logger.debug("_claim_overlap claim_sets lengths: %s", [len(c) for c in claim_sets])
+    for idx, cs in enumerate(claim_sets):
+        if cs:
+            logger.debug("_claim_overlap run %d first_claim=%r", idx, cs[0][:50])
     if all(not claims for claims in claim_sets):
         return None
     if len(claim_sets) < 2:
@@ -141,7 +169,9 @@ def _claim_overlap(valid_records: list[dict[str, Any]], threshold: float, model_
     pairwise_scores: list[float] = []
     for idx, left in enumerate(claim_sets):
         for right in claim_sets[idx + 1 :]:
-            pairwise_scores.append(_pair_claim_jaccard(left, right, threshold, model))
+            val = _pair_claim_jaccard(left, right, threshold, model)
+            pairwise_scores.append(val)
+            logger.debug("_claim_overlap pair jaccard added: %s", val)
     if not pairwise_scores:
         return None
     return float(np.mean(pairwise_scores))
@@ -171,6 +201,8 @@ def _confidence_variance(valid_records: list[dict[str, Any]]) -> tuple[float | N
     mean = float(np.mean(values))
     sd = float(np.std(values, ddof=1))
     cv = float(sd / abs(mean)) if abs(mean) > 1e-12 else None
+    logger.debug("_confidence_variance confidences=%s", confidences)
+    logger.debug("_confidence_variance mean=%s sd=%s cv=%s", mean, sd, cv)
     return sd, cv
 
 
@@ -267,6 +299,23 @@ def _citation_krippendorff(valid_records: list[dict[str, Any]]) -> float | None:
     return float(stats.krippendorff_alpha(matrix, level="nominal"))
 
 
+def _safe_mean(values: Iterable[float | None]) -> float | None:
+    cleaned = []
+    for value in values:
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(numeric):
+            continue
+        cleaned.append(numeric)
+    if not cleaned:
+        return None
+    return float(np.mean(cleaned))
+
+
 def evaluate_reliability(generated_outputs: Iterable[dict[str, Any]], claim_match_threshold: float | None = None, model_name: str = "all-MiniLM-L6-v2") -> dict[str, Any]:
     """Compute query-level reliability for repeated generation results.
 
@@ -279,6 +328,7 @@ def evaluate_reliability(generated_outputs: Iterable[dict[str, Any]], claim_matc
     threshold = _resolve_claim_match_threshold(override=claim_match_threshold)
 
     records = list(generated_outputs)
+    # Input contract validation: each record must be a dict and include required keys
     if not records:
         return {
             "query_id": None,
@@ -290,24 +340,45 @@ def evaluate_reliability(generated_outputs: Iterable[dict[str, Any]], claim_matc
             "confidence_sd": None,
             "confidence_cv": None,
             "krippendorff_alpha": None,
+            "reliability_score": None,
             "reason": "No records were provided.",
         }
+
+    # Validate record structure strictly to avoid silent failures
+    for idx, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise ValueError(f"Record at index {idx} is not a dict (got {type(record).__name__}).")
+        if "parsed_json" not in record:
+            raise ValueError(f"Record at index {idx} missing required key 'parsed_json'.")
+        if "query_id" not in record:
+            raise ValueError(f"Record at index {idx} missing required key 'query_id'.")
 
     query_id = next((record.get("query_id") for record in records if isinstance(record, dict) and record.get("query_id") is not None), None)
     valid_records: list[dict[str, Any]] = []
     parse_failures = 0
-    for record in records:
+    excluded: list[tuple[int, Any, str]] = []
+    for idx, record in enumerate(records):
         if not isinstance(record, dict):
             parse_failures += 1
+            excluded.append((idx, record, "not a dict"))
             continue
         payload = record.get("parsed_json")
         if payload in (None, "parse_failure"):
             parse_failures += 1
+            excluded.append((idx, record, f"payload invalid: {payload!r}"))
             continue
         if not isinstance(payload, dict):
             parse_failures += 1
+            excluded.append((idx, record, f"payload not dict: {type(payload).__name__}"))
             continue
         valid_records.append(record)
+
+    logger.debug("evaluate_reliability total_records=%s valid_records=%s parse_failures=%s", len(records), len(valid_records), parse_failures)
+    if excluded:
+        logger.debug("evaluate_reliability excluded records details:")
+        for ex in excluded:
+            irec, rec, reason = ex
+            logger.debug("  idx=%s run_index=%s reason=%s", irec, (rec.get('run_index') if isinstance(rec, dict) else rec), reason)
 
     if len(valid_records) < 2:
         return {
@@ -320,6 +391,7 @@ def evaluate_reliability(generated_outputs: Iterable[dict[str, Any]], claim_matc
             "confidence_sd": None,
             "confidence_cv": None,
             "krippendorff_alpha": None,
+            "reliability_score": None,
             "reason": "Need at least 2 valid runs after excluding parse failures.",
         }
 
@@ -336,6 +408,11 @@ def evaluate_reliability(generated_outputs: Iterable[dict[str, Any]], claim_matc
     elif citation_alpha is None:
         reason = "Citation agreement is undefined when all runs have no usable citation signal or only a single paper."
 
+    metric_values = [value for value in [semantic, claim_overlap] if value is not None]
+    reliability_score = _safe_mean(metric_values)
+    if reliability_score is None:
+        reason = "No valid metrics remained after filtering None/NaN values."
+
     return {
         "query_id": query_id,
         "n_runs": len(valid_records),
@@ -346,6 +423,7 @@ def evaluate_reliability(generated_outputs: Iterable[dict[str, Any]], claim_matc
         "confidence_sd": confidence_sd,
         "confidence_cv": confidence_cv,
         "krippendorff_alpha": citation_alpha,
+        "reliability_score": reliability_score,
         "reason": reason,
     }
 

@@ -137,3 +137,21 @@ This document records the methodological checks and corrective history for the r
 5. Cohen's kappa 的來源需要根據文獻與可驗算步驟明確標註，不能用未核實的引用。
 
 目前的狀態是：經過修正後，統計模組已在正確環境下通過測試，且其驗證記錄足以作為後續研究報告的方法論章節。
+
+## Smoke-test observation (2026-08-28)
+
+- During the 3×3 smoke run we observed a counterintuitive pattern: the query with the lowest average retrieval similarity (Query 3: 0.276) had the highest grounding rate (0.692). With only three queries this is anecdotal, not conclusive, but it directly challenges the simple hypothesis that "higher retrieval similarity implies better grounding" and is worth highlighting in the limitations/discussion section of the report.
+
+Recorded (summary): Query 1 avg_sim=0.366 grounding=0.333; Query 2 avg_sim=0.359 grounding=0.667; Query 3 avg_sim=0.276 grounding=0.692.
+
+Note: earlier runs returned `reliability_score = None` due to a data-structure mismatch between `generate_insights()` (which returns parsed JSON objects) and `evaluate_reliability()` (which expects records from `outputs/generations.jsonl` where the parsed payload is under the `parsed_json` key). That contract was fixed and validated; per-query reliability can be computed when the evaluator receives the logged JSONL records.
+
+<!-- Removed: previous note about identical overall_confidence values — diagnostic in progress. -->
+
+Diagnostic post-mortem (added 2026-08-28):
+
+- The original `reliability_score = None` observed earlier was a real bug: `main.py` previously passed `generate_insights()`'s raw parsed JSON objects directly into `evaluate_reliability()` rather than the expected `record` format where each item is a wrapper dict containing `parsed_json`. This is a repeated interface mismatch problem (first seen between `retrieve`→`generate`, then here between `generate`→`evaluate`). The codebase was updated to enforce and validate the record contract and fail fast on mismatch.
+
+- The previously-reported `confidence_sd = 1.36e-16` and `claim_jaccard = 0.0` were NOT actual pipeline bugs. They were produced by an independent diagnostic probe script that mistakenly mixed records from multiple queries (it did not filter by `query_id`) and computed statistics on the combined set. The pipeline, when run with the proper per-query records, yields `confidence_sd ≈ 0.0351` and `claim_jaccard ≈ 0.6667` for Query 1.
+
+- Lesson learned: ad-hoc probes that take a different code path or a different input filtering strategy can produce misleading evidence. Diagnostic helpers should operate on the exact production execution path (or be invoked from inside it), and debug output should be controlled (logger + flag) so that reproductions are consistent.

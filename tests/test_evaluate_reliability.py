@@ -7,6 +7,7 @@ import pytest
 from src.evaluate_actionability import evaluate_actionability
 from src.evaluate_reliability import evaluate_confidence_icc, evaluate_reliability, evaluate_reliability_from_jsonl
 from src.evaluate_validity import evaluate_validity
+from src.generate import _build_prompt
 
 
 def _make_record(query_id: str, run_index: int, claim: str, confidence: float, paper_ids: list[str] | None = None):
@@ -26,6 +27,36 @@ def _make_record(query_id: str, run_index: int, claim: str, confidence: float, p
             "overall_confidence": confidence,
         },
     }
+
+
+def test_build_prompt_includes_document_abstract_text():
+    docs = [
+        {
+            "id": "paper-1",
+            "title": "Paper title",
+            "abstract": "This abstract text must be present in the actual prompt.",
+        },
+        {
+            "id": "paper-2",
+            "title": "Another paper",
+            "abstract": "Second abstract text should also be visible.",
+        },
+    ]
+
+    prompt = _build_prompt(docs)
+
+    assert "This abstract text must be present in the actual prompt." in prompt
+    assert "Second abstract text should also be visible." in prompt
+
+
+def test_build_prompt_rejects_missing_or_empty_abstract():
+    docs = [{"id": "paper-1", "title": "Paper title", "abstract": ""}]
+
+    with pytest.raises(ValueError, match="abstract"):
+        _build_prompt(docs)
+
+    with pytest.raises((KeyError, ValueError), match="abstract"):
+        _build_prompt([{"id": "paper-2", "title": "Missing abstract doc"}])
 
 
 def test_evaluate_reliability_normal_case():

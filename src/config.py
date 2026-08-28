@@ -4,9 +4,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = ROOT / "config.yaml"
+
+load_dotenv(dotenv_path=ROOT / ".env", override=True)
 
 
 def load_config(config_path: str | Path | None = None) -> dict[str, Any]:

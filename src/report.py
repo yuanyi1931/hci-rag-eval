@@ -5,7 +5,25 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+
+
+def _safe_mean(series: pd.Series | list[float | None]) -> float | None:
+    values = []
+    for item in series if isinstance(series, list) else series:
+        if item is None:
+            continue
+        try:
+            numeric = float(item)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(numeric):
+            continue
+        values.append(numeric)
+    if not values:
+        return None
+    return float(np.mean(values))
 
 
 def write_summary_report(results: list[dict], root: str | Path = ".", provenance: dict | None = None) -> None:
@@ -16,6 +34,9 @@ def write_summary_report(results: list[dict], root: str | Path = ".", provenance
     provenance = provenance or {
         "model_name": "unknown",
         "api_calls": 0,
+        "generation_calls": 0,
+        "validity_calls": 0,
+        "actionability_calls": 0,
         "execution_time_seconds": 0.0,
         "config_hash": "unknown",
     }
@@ -25,6 +46,9 @@ def write_summary_report(results: list[dict], root: str | Path = ".", provenance
         for key, value in {
             "provenance_model_name": provenance.get("model_name", "unknown"),
             "provenance_api_calls": provenance.get("api_calls", 0),
+            "provenance_generation_calls": provenance.get("generation_calls", 0),
+            "provenance_validity_calls": provenance.get("validity_calls", 0),
+            "provenance_actionability_calls": provenance.get("actionability_calls", 0),
             "provenance_execution_time_seconds": provenance.get("execution_time_seconds", 0.0),
             "provenance_config_hash": provenance.get("config_hash", "unknown"),
         }.items():
@@ -53,6 +77,10 @@ def write_summary_report(results: list[dict], root: str | Path = ".", provenance
             "Please configure ANTHROPIC_API_KEY in .env and rerun the pipeline.\n\n"
         )
 
+    mean_grounding = _safe_mean(df['grounding_rate']) if not df.empty else 0.0
+    mean_reliability = _safe_mean(df['reliability_score']) if not df.empty else 0.0
+    mean_actionability = _safe_mean(df['actionability_mean']) if not df.empty else 0.0
+
     summary_lines = [
         "# HCI RAG Evaluation Summary",
         "",
@@ -64,15 +92,18 @@ def write_summary_report(results: list[dict], root: str | Path = ".", provenance
         "",
         f"- Model: {provenance.get('model_name', 'unknown')}",
         f"- API calls: {provenance.get('api_calls', 0)}",
+        f"- Generation calls: {provenance.get('generation_calls', 0)}",
+        f"- Validity calls: {provenance.get('validity_calls', 0)}",
+        f"- Actionability calls: {provenance.get('actionability_calls', 0)}",
         f"- Execution time (s): {provenance.get('execution_time_seconds', 0.0)}",
         f"- Config hash: {provenance.get('config_hash', 'unknown')}",
         "",
         "## Key metrics",
         "",
         f"- Queries evaluated: {len(df)}",
-        f"- Mean grounding rate: {df['grounding_rate'].mean() if not df.empty else 0.0:.3f}",
-        f"- Mean reliability score: {df['reliability_score'].mean() if not df.empty else 0.0:.3f}",
-        f"- Mean actionability score: {df['actionability_mean'].mean() if not df.empty else 0.0:.3f}",
+        f"- Mean grounding rate: {mean_grounding:.3f}" if mean_grounding is not None else "- Mean grounding rate: n/a",
+        f"- Mean reliability score: {mean_reliability:.3f}" if mean_reliability is not None else "- Mean reliability score: n/a",
+        f"- Mean actionability score: {mean_actionability:.3f}" if mean_actionability is not None else "- Mean actionability score: n/a",
         "",
         "## Interpretation",
         "",
