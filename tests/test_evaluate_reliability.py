@@ -4,7 +4,9 @@ import json
 
 import pytest
 
+from src.evaluate_actionability import evaluate_actionability
 from src.evaluate_reliability import evaluate_confidence_icc, evaluate_reliability, evaluate_reliability_from_jsonl
+from src.evaluate_validity import evaluate_validity
 
 
 def _make_record(query_id: str, run_index: int, claim: str, confidence: float, paper_ids: list[str] | None = None):
@@ -41,6 +43,47 @@ def test_evaluate_reliability_normal_case():
     assert result["confidence_sd"] > 0.0
     assert result["confidence_cv"] > 0.0
     assert result["krippendorff_alpha"] is not None
+
+
+def test_validity_records_three_votes_and_self_consistency():
+    generated_outputs = [{
+        "insights": [{
+            "claim": "The interface reduces friction for expert users.",
+            "supporting_paper_ids": ["p1"],
+            "reasoning": "Strong evidence.",
+        }]
+    }]
+    retrieved_docs = [{"id": "p1", "title": "Prototype study", "abstract": "Users reported less friction."}]
+
+    def fake_judge(*, claim, source_text):
+        return "entailed" if "friction" in claim.lower() else "not_entailed"
+
+    result = evaluate_validity(generated_outputs, retrieved_docs, judge_fn=fake_judge)
+
+    assert result["details"][0]["votes"] == ["entailed", "entailed", "entailed"]
+    assert result["details"][0]["judge_consistency"] == pytest.approx(1.0)
+
+
+def test_actionability_records_three_votes_and_self_consistency():
+    generated_outputs = [{
+        "insights": [{
+            "claim": "We should test a new interface.",
+            "supporting_paper_ids": ["p1"],
+            "reasoning": "This leads to an actionable recommendation.",
+        }]
+    }]
+
+    def fake_judge(*, text):
+        if "test" in text.lower():
+            return 4
+        if "recommendation" in text.lower():
+            return 3
+        return 4
+
+    result = evaluate_actionability(generated_outputs, judge_fn=fake_judge)
+
+    assert result["raw_votes"][0] == [4, 4, 4]
+    assert result["judge_consistency_values"][0] == pytest.approx(1.0)
 
 
 def test_evaluate_reliability_confidence_sd_varies_with_values():

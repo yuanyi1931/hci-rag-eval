@@ -33,7 +33,20 @@ generation:
   reruns: 5
   max_tokens: 800
 
+budget:
+  max_api_calls: 100        # 硬上限,先設保守值,smoke test 後依實測調整
+  warn_at_calls: 50
+
+runtime:
+  random_seed: 42
+  cache_enabled: true
+  cache_dir: "data/cache"
+
 evaluation:
+  judge_model: "claude-sonnet-4-6"
+  judge_temperature: 0.0
+  judge_n_votes: 3
+  claim_match_threshold: 0.8
   validity:
     method: "heuristic_plus_llm_judge"
   reliability:
