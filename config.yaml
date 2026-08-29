@@ -34,7 +34,7 @@ generation:
   max_tokens: 4096
 
 budget:
-  max_api_calls: 100        # 硬上限,先設保守值,smoke test 後依實測調整
+  max_api_calls: 600        # 中間規模驗證: 5 query × 5 rerun ≈ 240 generation + judge calls, 留餘裕
   warn_at_calls: 50
 
 runtime:

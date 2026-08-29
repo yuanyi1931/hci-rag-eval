@@ -9,4 +9,5 @@ __pycache__/
 /outputs/*.csv
 /outputs/*.md
 /outputs/*.png
+/outputs/*.jsonl
 !outputs/.gitkeep

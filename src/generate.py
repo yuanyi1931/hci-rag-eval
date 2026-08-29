@@ -148,6 +148,9 @@ def generate_insights(
     for run_index in range(reruns):
         prompt = _build_prompt(documents)
         last_error: Exception | None = None
+        raw_text = ""
+        parsed: Any = "parse_failure"
+        response: Any = None
         for attempt in range(2):
             try:
                 response = call_model(
@@ -160,13 +163,12 @@ def generate_insights(
                 )
                 raw_text = response.get("content", "") if isinstance(response, dict) else str(response)
                 parsed = _extract_json_text(raw_text)
-                # do not mutate parsed here; keep parsed under 'parsed_json' in record
                 break
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 last_error = exc
+                raw_text = str(response.get("content", "") if isinstance(response, dict) else response)
+                parsed = "parse_failure"
                 continue
-        else:
-            raise RuntimeError(f"Generation response could not be parsed into JSON after retrying. Last error: {last_error}")
 
         record = {
             "query_id": query_id,
