@@ -61,6 +61,33 @@ def _extract_insight_texts(output: dict[str, Any]) -> list[str]:
     return []
 
 
+def _normalize_generated_records(generated_outputs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Validate the record-wrapper contract and separate parse failures from usable payloads.
+
+    A missing 'parsed_json' key is a genuine interface contract violation (e.g. legacy
+    parsed-dict input) and raises immediately. A 'parsed_json' value that is present but not
+    a dict (typically the 'parse_failure' sentinel written by generate_insights when the model
+    output could not be parsed) is a legitimate runtime state, not a contract violation, so it is
+    skipped and counted rather than raised.
+    """
+    normalized: list[dict[str, Any]] = []
+    parse_failures = 0
+    for idx, output in enumerate(generated_outputs):
+        if not isinstance(output, dict):
+            raise ValueError(f"Actionability input at index {idx} is not a record dict: got {type(output).__name__}.")
+        if "parsed_json" not in output:
+            raise ValueError(
+                "Actionability input is using the legacy parsed-dict format; expected a record wrapper with 'parsed_json'. "
+                f"Received keys: {sorted(output.keys())}."
+            )
+        payload = output.get("parsed_json")
+        if not isinstance(payload, dict):
+            parse_failures += 1
+            continue
+        normalized.append(payload)
+    return normalized, parse_failures
+
+
 def _get_judge_n_votes() -> int:
     config = load_config()
     evaluation_cfg = config.get("evaluation", {}) if isinstance(config, dict) else {}
@@ -167,11 +194,16 @@ def evaluate_actionability(
     generated_outputs: list[dict[str, Any]],
     judge_fn: Any | None = None,
 ) -> dict[str, Any]:
+    if generated_outputs and isinstance(generated_outputs[0], dict):
+        print(f"evaluate_actionability first_input_keys={sorted(generated_outputs[0].keys())}")
+
+    records, parse_failures = _normalize_generated_records(generated_outputs)
+
     scores = []
     raw_votes: list[list[int]] = []
     judge_consistency_values: list[float] = []
 
-    for output in generated_outputs:
+    for output in records:
         for text in _extract_insight_texts(output):
             judge_result = _judge_actionability_item(text, judge_fn=judge_fn)
             raw_votes.append(judge_result["votes"])
@@ -184,6 +216,7 @@ def evaluate_actionability(
         "raw_votes": raw_votes,
         "judge_consistency_mean": float(mean(judge_consistency_values)) if judge_consistency_values else 0.0,
         "judge_consistency_values": judge_consistency_values,
+        "n_parse_failures": parse_failures,
     }
 
 

@@ -16,10 +16,16 @@ INPUT_TOKEN_PRICE_PER_1K = 0.003
 OUTPUT_TOKEN_PRICE_PER_1K = 0.015
 
 _API_CALL_COUNT = 0
+_CACHE_HIT_COUNT = 0
 _WARNED_AT_LIMIT = False
 _INPUT_TOKENS = 0
 _OUTPUT_TOKENS = 0
 _STAGE_CALL_COUNTS = {
+    "generation": 0,
+    "validity": 0,
+    "actionability": 0,
+}
+_STAGE_CACHE_HIT_COUNTS = {
     "generation": 0,
     "validity": 0,
     "actionability": 0,
@@ -83,21 +89,32 @@ def _check_budget() -> None:
 
 
 def reset_api_usage() -> None:
-    global _API_CALL_COUNT, _WARNED_AT_LIMIT, _INPUT_TOKENS, _OUTPUT_TOKENS
+    global _API_CALL_COUNT, _CACHE_HIT_COUNT, _WARNED_AT_LIMIT, _INPUT_TOKENS, _OUTPUT_TOKENS
     _API_CALL_COUNT = 0
+    _CACHE_HIT_COUNT = 0
     _WARNED_AT_LIMIT = False
     _INPUT_TOKENS = 0
     _OUTPUT_TOKENS = 0
     for key in _STAGE_CALL_COUNTS:
         _STAGE_CALL_COUNTS[key] = 0
+    for key in _STAGE_CACHE_HIT_COUNTS:
+        _STAGE_CACHE_HIT_COUNTS[key] = 0
 
 
 def get_api_call_count() -> int:
     return _API_CALL_COUNT
 
 
+def get_cache_hit_count() -> int:
+    return _CACHE_HIT_COUNT
+
+
 def get_stage_call_counts() -> dict[str, int]:
     return dict(_STAGE_CALL_COUNTS)
+
+
+def get_stage_cache_hit_counts() -> dict[str, int]:
+    return dict(_STAGE_CACHE_HIT_COUNTS)
 
 
 def get_token_usage() -> tuple[int, int]:
@@ -135,7 +152,7 @@ def print_usage_summary() -> None:
     total_cost = _get_cost_estimate(_INPUT_TOKENS, _OUTPUT_TOKENS)
     print(
         "LLM usage summary: "
-        f"calls={_API_CALL_COUNT}, input_tokens={_INPUT_TOKENS}, output_tokens={_OUTPUT_TOKENS}, "
+        f"calls={_API_CALL_COUNT}, cache_hits={_CACHE_HIT_COUNT}, input_tokens={_INPUT_TOKENS}, output_tokens={_OUTPUT_TOKENS}, "
         f"estimated_cost_usd=${total_cost:.6f}"
     )
 
@@ -254,9 +271,16 @@ def call_model(
     if cache_enabled is None:
         cache_enabled = bool(runtime.get("cache_enabled", True))
 
+    if stage in _STAGE_CALL_COUNTS:
+        _STAGE_CALL_COUNTS[stage] += 1
+
     if cache_enabled:
         cached = load_from_cache(model, prompt, temperature, run_index)
         if cached is not None:
+            global _CACHE_HIT_COUNT
+            _CACHE_HIT_COUNT += 1
+            if stage in _STAGE_CACHE_HIT_COUNTS:
+                _STAGE_CACHE_HIT_COUNTS[stage] += 1
             return cached
 
     effective_api_fn = api_fn or _anthropic_call
@@ -264,8 +288,6 @@ def call_model(
         try:
             global _API_CALL_COUNT
             _API_CALL_COUNT += 1
-            if stage in _STAGE_CALL_COUNTS:
-                _STAGE_CALL_COUNTS[stage] += 1
             _warn_if_needed()
             _check_budget()
             response = effective_api_fn(model=model, prompt=prompt, temperature=temperature, max_tokens=max_tokens)

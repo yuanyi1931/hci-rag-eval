@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from src.config import load_config
-from src.llm_client import make_cache_key
+from src.llm_client import (
+    call_model,
+    get_api_call_count,
+    get_cache_hit_count,
+    get_stage_call_counts,
+    make_cache_key,
+    reset_api_usage,
+)
 
 
 def test_config_includes_budget_runtime_and_judge_settings():
     config = load_config()
 
-    assert config["budget"]["max_api_calls"] == 100
+    assert config["budget"]["max_api_calls"] == 600
     assert config["budget"]["warn_at_calls"] == 50
     assert config["runtime"]["random_seed"] == 42
     assert config["runtime"]["cache_enabled"] is True
@@ -36,3 +43,25 @@ def test_cache_key_differs_when_run_index_changes():
     )
 
     assert key_a != key_b
+
+
+def test_call_model_counts_cache_hits_separately_from_api_calls(monkeypatch, tmp_path):
+    reset_api_usage()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr("src.llm_client._get_runtime_config", lambda: {"cache_enabled": True, "cache_dir": str(tmp_path)})
+
+    calls = {"count": 0}
+
+    def fake_api_fn(**kwargs):
+        calls["count"] += 1
+        return {"content": "ok", "usage": {"input_tokens": 10, "output_tokens": 5}}
+
+    first = call_model(model="claude-sonnet-4-6", prompt="same prompt", temperature=0.0, run_index=0, api_fn=fake_api_fn)
+    second = call_model(model="claude-sonnet-4-6", prompt="same prompt", temperature=0.0, run_index=0, api_fn=fake_api_fn)
+
+    assert first["content"] == "ok"
+    assert second["content"] == "ok"
+    assert calls["count"] == 1
+    assert get_api_call_count() == 1
+    assert get_cache_hit_count() == 1
+    assert get_stage_call_counts()["generation"] == 2

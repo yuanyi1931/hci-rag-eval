@@ -16,7 +16,7 @@ def test_reuse_flag_missing_file_raises(tmp_path):
 
 def test_default_does_not_reuse_even_if_file_exists(tmp_path):
     gens_dir = tmp_path / "outputs"
-    gens_dir.mkdir()
+    gens_dir.mkdir(exist_ok=True)
     gens_path = gens_dir / "generations.jsonl"
     # write a dummy content
     gens_path.write_text('{"query_id": 1}\n')

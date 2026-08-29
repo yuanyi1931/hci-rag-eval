@@ -16,7 +16,7 @@ from src.config import load_config
 from src.fetch_data import fetch_arxiv_abstracts
 from src.embed import build_embeddings
 from src.generate import generate_insights, get_api_call_count
-from src.llm_client import get_stage_call_counts, reset_api_usage
+from src.llm_client import get_stage_call_counts, get_stage_cache_hit_counts, reset_api_usage
 from src.retrieve import build_query_from_text, compute_top_k, load_embeddings
 from src.evaluate_validity import evaluate_validity
 from src.evaluate_reliability import evaluate_reliability
@@ -170,6 +170,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 "grounding_rate": validity["grounding_rate"],
                 "citation_validity_rate": validity["citation_validity_rate"],
                 "reliability_score": reliability["reliability_score"],
+                "semantic_consistency": reliability["semantic_consistency"],
+                "claim_jaccard": reliability["claim_jaccard"],
+                "confidence_sd": reliability["confidence_sd"],
+                "confidence_cv": reliability["confidence_cv"],
+                "krippendorff_alpha": reliability["krippendorff_alpha"],
                 "actionability_mean": actionability["mean_score"],
                 "top_papers": [item["id"] for item in top_docs],
                 "provenance_model_name": provenance["model_name"],
@@ -198,6 +203,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
         f"generation={provenance['generation_calls']}, "
         f"validity={provenance['validity_calls']}, "
         f"actionability={provenance['actionability_calls']}, total={provenance['api_calls']}"
+    )
+    stage_cache_hits = get_stage_cache_hit_counts()
+    print(
+        "Stage cache-hit counts: "
+        f"generation={stage_cache_hits.get('generation', 0)}, "
+        f"validity={stage_cache_hits.get('validity', 0)}, "
+        f"actionability={stage_cache_hits.get('actionability', 0)}"
     )
     print(f"Results written to {ROOT / 'outputs' / 'results.csv'} and {ROOT / 'outputs' / 'report.md'}")
 

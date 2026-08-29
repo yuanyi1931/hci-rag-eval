@@ -78,33 +78,46 @@ def test_evaluate_reliability_normal_case():
 
 def test_validity_records_three_votes_and_self_consistency():
     generated_outputs = [{
-        "insights": [{
-            "claim": "The interface reduces friction for expert users.",
-            "supporting_paper_ids": ["p1"],
-            "reasoning": "Strong evidence.",
-        }]
+        "query_id": "q-validity-1",
+        "run_index": 0,
+        "parsed_json": {
+            "insights": [{
+                "claim": "The interface reduces friction for expert users.",
+                "supporting_paper_ids": ["p1"],
+                "reasoning": "Strong evidence.",
+            }]
+        },
     }]
     retrieved_docs = [{"id": "p1", "title": "Prototype study", "abstract": "Users reported less friction."}]
+    seen_claims = []
 
     def fake_judge(*, claim, source_text):
+        seen_claims.append(claim)
         return "entailed" if "friction" in claim.lower() else "not_entailed"
 
     result = evaluate_validity(generated_outputs, retrieved_docs, judge_fn=fake_judge)
 
+    assert seen_claims == ["The interface reduces friction for expert users."] * 3
     assert result["details"][0]["votes"] == ["entailed", "entailed", "entailed"]
     assert result["details"][0]["judge_consistency"] == pytest.approx(1.0)
 
 
 def test_actionability_records_three_votes_and_self_consistency():
     generated_outputs = [{
-        "insights": [{
-            "claim": "We should test a new interface.",
-            "supporting_paper_ids": ["p1"],
-            "reasoning": "This leads to an actionable recommendation.",
-        }]
+        "query_id": "q-actionability-1",
+        "run_index": 0,
+        "parsed_json": {
+            "insights": [{
+                "claim": "We should test a new interface.",
+                "supporting_paper_ids": ["p1"],
+                "reasoning": "This leads to an actionable recommendation.",
+            }]
+        },
     }]
+    seen_texts = []
 
     def fake_judge(*, text):
+        seen_texts.append(text)
         if "test" in text.lower():
             return 4
         if "recommendation" in text.lower():
@@ -113,6 +126,8 @@ def test_actionability_records_three_votes_and_self_consistency():
 
     result = evaluate_actionability(generated_outputs, judge_fn=fake_judge)
 
+    assert len(seen_texts) == 3
+    assert all("We should test a new interface." in text for text in seen_texts)
     assert result["raw_votes"][0] == [4, 4, 4]
     assert result["judge_consistency_values"][0] == pytest.approx(1.0)
 
@@ -234,3 +249,105 @@ def test_evaluate_reliability_single_paper_citation_returns_none():
 
     assert result["krippendorff_alpha"] is None
     assert "Citation agreement is undefined" in result["reason"]
+
+
+def test_evaluate_validity_rejects_legacy_parsed_dict_input():
+    generated_outputs = [{
+        "insights": [{
+            "claim": "The interface reduces friction for expert users.",
+            "supporting_paper_ids": ["p1"],
+            "reasoning": "Strong evidence.",
+        }]
+    }]
+    retrieved_docs = [{"id": "p1", "title": "Prototype study", "abstract": "Users reported less friction."}]
+
+    with pytest.raises(ValueError, match="parsed_json"):
+        evaluate_validity(generated_outputs, retrieved_docs)
+
+
+def test_evaluate_actionability_rejects_legacy_parsed_dict_input():
+    generated_outputs = [{
+        "insights": [{
+            "claim": "We should test a new interface.",
+            "supporting_paper_ids": ["p1"],
+            "reasoning": "This leads to an actionable recommendation.",
+        }]
+    }]
+
+    with pytest.raises(ValueError, match="parsed_json"):
+        evaluate_actionability(generated_outputs)
+
+
+def test_evaluate_validity_skips_parse_failure_records_without_raising():
+    generated_outputs = [
+        {
+            "query_id": "q8",
+            "run_index": 0,
+            "parsed_json": {
+                "insights": [{
+                    "claim": "The interface reduces friction for expert users.",
+                    "supporting_paper_ids": ["p1"],
+                    "reasoning": "Strong evidence.",
+                }]
+            },
+        },
+        {"query_id": "q8", "run_index": 1, "parsed_json": "parse_failure"},
+    ]
+    retrieved_docs = [{"id": "p1", "title": "Prototype study", "abstract": "Users reported less friction."}]
+
+    def fake_judge(*, claim, source_text):
+        return "entailed"
+
+    result = evaluate_validity(generated_outputs, retrieved_docs, judge_fn=fake_judge)
+
+    assert result["total_claims"] == 1
+    assert result["n_parse_failures"] == 1
+
+
+def test_evaluate_actionability_skips_parse_failure_records_without_raising():
+    generated_outputs = [
+        {
+            "query_id": "q9",
+            "run_index": 0,
+            "parsed_json": {
+                "insights": [{
+                    "claim": "We should test a new interface.",
+                    "supporting_paper_ids": ["p1"],
+                    "reasoning": "This leads to an actionable recommendation.",
+                }]
+            },
+        },
+        {"query_id": "q9", "run_index": 1, "parsed_json": "parse_failure"},
+    ]
+
+    def fake_judge(*, text):
+        return 4
+
+    result = evaluate_actionability(generated_outputs, judge_fn=fake_judge)
+
+    assert result["scores"] == [4]
+    assert result["n_parse_failures"] == 1
+
+
+def test_evaluate_actionability_accepts_record_wrapper_format():
+    generated_outputs = [{
+        "query_id": "q7",
+        "run_index": 0,
+        "parsed_json": {
+            "insights": [{
+                "claim": "We should test a new interface.",
+                "supporting_paper_ids": ["p1"],
+                "reasoning": "This leads to an actionable recommendation.",
+            }]
+        },
+    }]
+
+    def fake_judge(*, text):
+        if "test" in text.lower():
+            return 4
+        return 4
+
+    result = evaluate_actionability(generated_outputs, judge_fn=fake_judge)
+
+    assert result["scores"] == [4]
+    assert result["mean_score"] == pytest.approx(4.0)

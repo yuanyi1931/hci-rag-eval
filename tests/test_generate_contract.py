@@ -1,6 +1,7 @@
 import json
 import pytest
 
+import src.generate as generate_module
 from src.generate import generate_insights
 
 
@@ -12,6 +13,7 @@ def fake_call_model(**kwargs):
 
 def test_generate_insights_returns_record_contract(monkeypatch, tmp_path):
     monkeypatch.setattr('src.generate.call_model', fake_call_model)
+    monkeypatch.setattr(generate_module, "OUTPUT_PATH", tmp_path / "generations.jsonl")
     docs = [
         {"id": "p1", "title": "T1", "abstract": "A1"},
         {"id": "p2", "title": "T2", "abstract": "A2"},
@@ -27,6 +29,7 @@ def test_generate_insights_returns_record_contract(monkeypatch, tmp_path):
         assert 'token_usage' in rec
         assert isinstance(rec['parsed_json'], dict)
         assert rec['query_id'] == 1
+    assert (tmp_path / "generations.jsonl").exists()
 
 
 def test_generate_insights_keeps_parse_failure_instead_of_crashing(monkeypatch, tmp_path):
@@ -34,6 +37,7 @@ def test_generate_insights_keeps_parse_failure_instead_of_crashing(monkeypatch, 
         return {"content": '{"insights": [{"claim": "A", "supporting_paper_ids": [], "reasoning": "r"}, "overall_confidence": 0.5}', "usage": {"input_tokens": 1, "output_tokens": 1}}
 
     monkeypatch.setattr('src.generate.call_model', fake_bad_call_model)
+    monkeypatch.setattr(generate_module, "OUTPUT_PATH", tmp_path / "generations.jsonl")
     docs = [
         {"id": "p1", "title": "T1", "abstract": "A1"},
         {"id": "p2", "title": "T2", "abstract": "A2"},
@@ -42,3 +46,4 @@ def test_generate_insights_keeps_parse_failure_instead_of_crashing(monkeypatch, 
     assert len(results) == 1
     assert results[0]["parsed_json"] == "parse_failure"
     assert "claim" in results[0]["raw_response"]
+    assert (tmp_path / "generations.jsonl").exists()

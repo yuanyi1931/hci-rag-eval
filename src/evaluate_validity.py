@@ -37,6 +37,33 @@ def _extract_claims(output: dict[str, Any]) -> list[tuple[str, list[str]]]:
     return []
 
 
+def _normalize_generated_records(generated_outputs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Validate the record-wrapper contract and separate parse failures from usable payloads.
+
+    A missing 'parsed_json' key is a genuine interface contract violation (e.g. legacy
+    parsed-dict input) and raises immediately. A 'parsed_json' value that is present but not
+    a dict (typically the 'parse_failure' sentinel written by generate_insights when the model
+    output could not be parsed) is a legitimate runtime state, not a contract violation, so it is
+    skipped and counted rather than raised.
+    """
+    normalized: list[dict[str, Any]] = []
+    parse_failures = 0
+    for idx, output in enumerate(generated_outputs):
+        if not isinstance(output, dict):
+            raise ValueError(f"Validity input at index {idx} is not a record dict: got {type(output).__name__}.")
+        if "parsed_json" not in output:
+            raise ValueError(
+                "Validity input is using the legacy parsed-dict format; expected a record wrapper with 'parsed_json'. "
+                f"Received keys: {sorted(output.keys())}."
+            )
+        payload = output.get("parsed_json")
+        if not isinstance(payload, dict):
+            parse_failures += 1
+            continue
+        normalized.append(payload)
+    return normalized, parse_failures
+
+
 def _keyword_overlap(claim: str, source_text: str) -> bool:
     claim_tokens = set(re.findall(r"[a-zA-Z]+", claim.lower()))
     source_tokens = set(re.findall(r"[a-zA-Z]+", source_text.lower()))
@@ -152,6 +179,11 @@ def evaluate_validity(
     preserved in the returned details so the project can report the judge's own consistency alongside
     the final majority decision.
     """
+    if generated_outputs and isinstance(generated_outputs[0], dict):
+        print(f"evaluate_validity first_input_keys={sorted(generated_outputs[0].keys())}")
+
+    records, parse_failures = _normalize_generated_records(generated_outputs)
+
     total_claims = 0
     supported_claims = 0
     details = []
@@ -159,7 +191,7 @@ def evaluate_validity(
     citation_rates: list[float] = []
     retrieved_ids = {str(doc.get("id") or doc.get("paper_id") or "") for doc in retrieved_docs}
 
-    for output in generated_outputs:
+    for output in records:
         for claim, support_ids in _extract_claims(output):
             total_claims += 1
             citation_rate = 1.0
@@ -209,4 +241,5 @@ def evaluate_validity(
         "total_claims": total_claims,
         "judge_consistency_mean": judge_consistency_mean,
         "details": details,
+        "n_parse_failures": parse_failures,
     }
