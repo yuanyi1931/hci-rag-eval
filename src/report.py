@@ -51,6 +51,8 @@ def write_summary_report(results: list[dict], root: str | Path = ".", provenance
             "provenance_actionability_calls": provenance.get("actionability_calls", 0),
             "provenance_execution_time_seconds": provenance.get("execution_time_seconds", 0.0),
             "provenance_config_hash": provenance.get("config_hash", "unknown"),
+            "provenance_reuse_generations": provenance.get("reuse_generations", False),
+            "provenance_generations_mtime": provenance.get("generations_mtime", None),
         }.items():
             if key not in df.columns:
                 df[key] = value
@@ -96,6 +98,8 @@ def write_summary_report(results: list[dict], root: str | Path = ".", provenance
         f"- Validity calls: {provenance.get('validity_calls', 0)}",
         f"- Actionability calls: {provenance.get('actionability_calls', 0)}",
         f"- Execution time (s): {provenance.get('execution_time_seconds', 0.0)}",
+        f"- Reused generations file: {provenance.get('reuse_generations', False)}",
+        f"- Generations file mtime: {provenance.get('generations_mtime', 'n/a')}",
         f"- Config hash: {provenance.get('config_hash', 'unknown')}",
         "",
         "## Key metrics",

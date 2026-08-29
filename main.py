@@ -22,6 +22,38 @@ from src.evaluate_validity import evaluate_validity
 from src.evaluate_reliability import evaluate_reliability
 from src.evaluate_actionability import evaluate_actionability
 from src.report import write_summary_report
+from datetime import datetime
+from typing import Optional, Tuple, List, Dict, Any
+
+
+def _maybe_load_generations(gens_path: Path, reuse_flag: bool) -> Optional[Tuple[List[dict], str]]:
+    """If reuse_flag is True, attempt to load the generations JSONL file.
+
+    Returns (all_recs, mtime_iso) on success. If reuse_flag is False, returns None.
+    If reuse_flag is True but the file does not exist, raises FileNotFoundError.
+    """
+    if not reuse_flag:
+        return None
+    if not gens_path.exists():
+        raise FileNotFoundError(f"--reuse-generations specified but generations file not found at {gens_path}")
+    from src.evaluate_reliability import _load_generations_jsonl
+
+    all_recs = _load_generations_jsonl(gens_path)
+    mtime = gens_path.stat().st_mtime
+    mtime_iso = datetime.fromtimestamp(mtime).isoformat()
+    # Logging a clear warning block so reuse is obvious in logs
+    qids = {r.get("query_id") for r in all_recs if isinstance(r, dict) and "query_id" in r}
+    logger = logging.getLogger(__name__)
+    logger.warning("""
+==================== REUSING EXISTING generations.jsonl ====================
+Path: %s
+Modified: %s
+Total records loaded: %d
+Distinct query_ids covered: %d
+NOTE: These results are reused from the generations file and are NOT newly generated.
+=============================================================================
+""", gens_path, mtime_iso, len(all_recs), len(qids))
+    return all_recs, mtime_iso
 
 
 def _apply_config_defaults(args: argparse.Namespace, config: dict) -> None:
@@ -88,6 +120,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "actionability_calls": 0,
         "execution_time_seconds": 0.0,
         "config_hash": config_hash,
+        "reuse_generations": False,
+        "generations_mtime": None,
     }
 
     for idx, query in enumerate(query_texts, start=1):
@@ -96,13 +130,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
         # If an outputs/generations.jsonl exists, prefer loading generated records
         # from disk for debugging / replay so we do not re-call the generation API.
         gens_path = ROOT / "outputs" / "generations.jsonl"
-        if gens_path.exists():
-            from src.evaluate_reliability import _load_generations_jsonl
-
-            all_recs = _load_generations_jsonl(gens_path)
-            # filter by this query id
-            generated = [r for r in all_recs if r.get("query_id") == idx]
-        else:
+        maybe_loaded = _maybe_load_generations(gens_path, getattr(args, "reuse_generations", False))
+        if maybe_loaded is None:
+            # Not reusing; always regenerate even if file exists
             generated = generate_insights(
                 top_docs,
                 reruns=args.reruns,
@@ -110,6 +140,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 model_name=args.generation_model_name,
                 query_id=idx,
             )
+        else:
+            all_recs, mtime_iso = maybe_loaded
+            # filter by this query id
+            generated = [r for r in all_recs if r.get("query_id") == idx]
+            # Record provenance about reuse (only once is fine)
+            provenance["reuse_generations"] = True
+            provenance["generations_mtime"] = mtime_iso
 
         # Diagnostic debug print immediately before evaluate_reliability
         # (user-requested format) — use logger.debug so it's controlled by --debug
@@ -177,6 +214,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-name", type=str, default=None, help="Sentence-transformer embedding model")
     parser.add_argument("--generation-model-name", type=str, default=None, help="LLM generation model")
     parser.add_argument("--force-refresh", action="store_true", help="Refetch and rebuild embeddings")
+    parser.add_argument("--reuse-generations", action="store_true", help="Reuse existing outputs/generations.jsonl instead of regenerating (must exist)")
     return parser.parse_args()
 
 
