@@ -254,3 +254,52 @@ This is directionally consistent with the earlier 3×3 smoke-test observation (�
 -0.35 這個數字來自對話中未經計算的目視估計,實際計算為 -0.147。這是本專案記錄到的一個案例:看似有據的數值來自不可靠的推導程序,與本研究要量化的 validity 問題同構。
 
 One possible (unvalidated) explanation, offered as a hypothesis and not a finding: when retrieved papers are topically similar to each other (high average similarity), the model may tend toward cross-paper synthesis, producing more abstract claims that are harder to attribute to any single source paper and thus harder for the judge to mark as grounded. When retrieved papers are more topically dispersed (low average similarity), the model may be forced to make more paper-by-paper statements that stay closer to each source's original text and are therefore easier to judge as grounded. This has not been tested and should not be treated as established; it is recorded here only as a candidate explanation to investigate if/when the query set is expanded beyond n=5.
+
+## 14. Phase 4 (10×5) provenance audit: cache-hit split and retry/rate-limit check
+
+Two verification questions were raised before allowing the project to move to the reporting phase, both answered empirically against the run log (`/tmp/pipeline_full10.log`, produced with `--debug`) rather than assumed.
+
+**Cache-hit split.** `main.py`'s printed `Stage cache-hit counts: generation=28` out of `Stage call counts: generation=53`. Cache keys are derived from `{model, prompt, temperature, run_index}`, so any query whose text, temperature (0.7), and run_index sequence already existed in `data/cache/` from the earlier 5×5 run (Phase 3, queries 1–5) is served without a new API call. Cross-checking `outputs/generations.jsonl` timestamps confirms this directly: queries 1–5 (25 records) each have all 5 `run_index` timestamps clustered within ~20–30ms of each other per query — far too fast to be real network round-trips — while queries 6–10 (25 records) show ~10–12s spacing between consecutive `run_index` values, consistent with genuine API latency. Conclusion: **all 25 records for queries 1–5 were served from the Phase 3 cache; only queries 6–10 (25 records) were newly generated in Phase 4.** This should be stated plainly wherever Phase 4 is described: the run performed 25 new generation calls, not 50.
+
+The generation-stage call count of 53 (not 50) and cache-hit count of 28 (not 25) are 3 higher than the naive record count on both sides; 53 − 28 = 25 real calls either way, so the reconciliation is internally consistent. The extra 3 invocations are attributed to `generate.py`'s parse-retry path (a malformed/non-JSON response triggers a same-run_index retry, which counts as an additional stage invocation and cache lookup, but does not create an additional final record) — this matches the one documented `parse_failure` case (query_id=4) plus at least two silently-recovered retries. This has not been traced line-by-line to specific timestamps and is recorded as the best-available explanation, not a proven one.
+
+**429 rate-limit check.** Extracting the literal HTTP status code from every `HTTP Request: POST ... "HTTP/1.1 <code>"` log line gives:
+
+```
+706 200
+  1 503
+```
+
+Zero HTTP 429 responses occurred during the run. The earlier naive `grep -c "429"` (38 matches) and `grep -ciE "rate.?limit"` (1517 matches) are false positives: they match substrings inside embedding-vector floats (e.g. `0.429...`), idempotency keys (`...-8429-...`), and the `anthropic-ratelimit-*` response *headers* that Anthropic sends on every single response regardless of whether a limit was ever hit. The only non-200 response in the entire log is a single transient `503` that succeeded on the SDK's internal retry. **429 rate-limiting was not a factor in the 44.8-minute vs 13–15-minute runtime deviation.**
+
+**The actual cause of the runtime deviation (new finding).** Comparing the wall-clock timestamps embedded in `outputs/generations.jsonl` across queries shows the real elapsed time of the run was **not** 44.8 minutes. Query 6 finishes at 16:55:16 and query 7 begins at 16:59:36 (a normal ~4m20s gap, consistent with the judge-evaluation calls for query 6 running in between). But query 7 finishes at 17:00:21 and query 8 does not begin until **23:14:50 — a gap of roughly 6 hours 14 minutes**, with smaller ~3–4 minute gaps between the remaining queries. The reported `provenance_execution_time_seconds = 2687.779` (44.8 min) clearly excludes this multi-hour gap, which is only visible in the raw timestamps, not in the reported duration.
+
+The most likely explanation: `main.py` measures duration with `time.perf_counter()`, a monotonic clock that on macOS does not advance (or advances inconsistently) while the machine is asleep/suspended. This run was launched as a long, unattended background process; the laptop most likely went to sleep for several hours partway through and woke up later, resuming the same process. The monotonic timer picked up roughly where it left off, so the *reported* execution time reflects only the active/awake portion of the run, while the *real* wall-clock span (first request to last request) was closer to 6.5 hours.
+
+This means the "3× deviation" framing given earlier (44.8 min vs 13–15 min estimate) is itself based on an unreliable metric for this particular run — the true wall-clock span was roughly 26–30× the estimate, not 3×, though the *productive* (awake) compute time may genuinely be close to the reported 44.8 minutes. Practical takeaway for scaling: the real bottleneck for long unattended runs on a laptop is **system sleep during background execution**, not API rate limiting. Future large-scale runs should either run on a machine/server that does not sleep, or wrap the invocation with `caffeinate` (macOS) to prevent suspension, and should log a wall-clock start/end timestamp pair (not just monotonic elapsed seconds) so this class of discrepancy is visible without needing to reconstruct it from per-record timestamps after the fact.
+
+## 15. 【相關性的三次結果不一致】
+
+Three independent runs at three different scales have now each produced a Pearson correlation between `average_retrieval_similarity` and `grounding_rate`, and the three results disagree in direction and are all statistically non-significant:
+
+| Run | n | r | p |
+|---|---|---|---|
+| 3×3 smoke test | 3 | direction negative (qualitative only — lowest-similarity query had the highest grounding rate; no r computed for n=3) | — |
+| 5×5 | 5 | −0.147 | 0.813 |
+| 10×5 | 10 | +0.222 | 0.538 |
+
+All three p-values are far above the conventional 0.05 threshold, and the sign of the correlation flips between the 5×5 and 10×5 runs. **This should be reported as a genuine null/inconsistent result and must not be spun as evidence of a trend in either direction** — there is no reliable, reproducible relationship between retrieval similarity and grounding rate detectable under this experimental setup at these sample sizes.
+
+Design-limitation caveat: across the 10 queries in the largest run, `average_retrieval_similarity` only ranges from 0.197 to 0.388 (sd = 0.065) — a narrow band that may simply be too small to produce a detectable effect on grounding rate even if a real relationship exists. Properly testing this hypothesis would require deliberately constructing a query set with much larger spread in retrieval quality (e.g. some queries designed to retrieve highly on-topic papers, others designed to retrieve marginally relevant ones), rather than relying on the incidental similarity range that happens to occur across a small set of naturally-chosen queries.
+
+## 16. 【citation hallucination 的三種子類型】
+
+Across n=10 (50 generation records), exactly 3 citation hallucinations were found, and all 3 are **near-neighbor arXiv-id confusions with zero outright fabrications** — in every case the cited id is a real, well-formed arXiv identifier, just not one of the retrieved top-k papers, and it differs from an actually-retrieved id by a single small edit:
+
+- **Digit swap**: `2008.03582v1` → `2008.02582v1`
+- **Version suffix**: `2006.00372v1` → `2006.00372v2`
+- **Year prefix**: `2005.02582v1` → `2008.02582v1`
+
+arXiv identifiers follow a rigid `YYMM.NNNNN` + `vVERSION` structure, and this structure appears to make single-position digit or version errors especially plausible for the model to produce — the hallucinated id "looks" exactly as legitimate as the correct one, follows the same format, and could easily belong to some other real paper. This is precisely the failure mode an LLM-judge-based check might miss, since nothing about the hallucinated citation looks wrong in isolation; it requires knowing the *exact* set of ids that were actually retrieved for that query to catch it.
+
+This is exactly what `citation_validity_rate` does: a pure deterministic top-k membership check (is the cited id literally in the retrieved set for this query?) catches all 3 cases with 100% reliability, at zero additional API/judge cost. This validates the project's two-layer validity design — the cheapest layer (no LLM call at all) catches the hardest-to-detect error type, while the more expensive LLM-judge layer is reserved for genuinely subjective judgments (e.g., is a claim actually supported by the cited text) that a deterministic check cannot make.

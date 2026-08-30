@@ -14,7 +14,7 @@ from src.llm_client import (
 def test_config_includes_budget_runtime_and_judge_settings():
     config = load_config()
 
-    assert config["budget"]["max_api_calls"] == 600
+    assert config["budget"]["max_api_calls"] == 1000
     assert config["budget"]["warn_at_calls"] == 50
     assert config["runtime"]["random_seed"] == 42
     assert config["runtime"]["cache_enabled"] is True

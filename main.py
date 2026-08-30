@@ -22,7 +22,7 @@ from src.evaluate_validity import evaluate_validity
 from src.evaluate_reliability import evaluate_reliability
 from src.evaluate_actionability import evaluate_actionability
 from src.report import write_summary_report
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Tuple, List, Dict, Any
 
 
@@ -84,6 +84,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     reset_api_usage()
     config_hash = _config_hash(config)
     start_time = time.perf_counter()
+    wall_clock_start = datetime.now(timezone.utc)
 
     raw_path = ROOT / config.get("data", {}).get("raw_path", "data/raw/abstracts.jsonl")
     embeddings_path = ROOT / config.get("data", {}).get("embeddings_path", "data/embeddings.npy")
@@ -122,7 +123,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "config_hash": config_hash,
         "reuse_generations": False,
         "generations_mtime": None,
+        "generation_cache_hits": 0,
+        "generation_real_calls": 0,
+        "fully_cached_query_ids": [],
+        "wall_clock_start": wall_clock_start.isoformat(),
+        "wall_clock_end": None,
+        "wall_clock_elapsed_seconds": None,
     }
+    fully_cached_query_ids: list[int] = []
 
     for idx, query in enumerate(query_texts, start=1):
         query_embedding = build_query_from_text(query, model_name=args.model_name)
@@ -133,6 +141,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
         maybe_loaded = _maybe_load_generations(gens_path, getattr(args, "reuse_generations", False))
         if maybe_loaded is None:
             # Not reusing; always regenerate even if file exists
+            gen_calls_before = get_stage_call_counts().get("generation", 0)
+            gen_cache_hits_before = get_stage_cache_hit_counts().get("generation", 0)
             generated = generate_insights(
                 top_docs,
                 reruns=args.reruns,
@@ -140,6 +150,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 model_name=args.generation_model_name,
                 query_id=idx,
             )
+            gen_calls_after = get_stage_call_counts().get("generation", 0)
+            gen_cache_hits_after = get_stage_cache_hit_counts().get("generation", 0)
+            query_gen_calls = gen_calls_after - gen_calls_before
+            query_gen_cache_hits = gen_cache_hits_after - gen_cache_hits_before
+            if query_gen_calls > 0 and query_gen_cache_hits == query_gen_calls:
+                fully_cached_query_ids.append(idx)
         else:
             all_recs, mtime_iso = maybe_loaded
             # filter by this query id
@@ -185,11 +201,20 @@ def run_pipeline(args: argparse.Namespace) -> None:
         )
 
     stage_counts = get_stage_call_counts()
+    stage_cache_hits = get_stage_cache_hit_counts()
     provenance["api_calls"] = get_api_call_count()
     provenance["generation_calls"] = stage_counts.get("generation", 0)
     provenance["validity_calls"] = stage_counts.get("validity", 0)
     provenance["actionability_calls"] = stage_counts.get("actionability", 0)
+    provenance["generation_cache_hits"] = stage_cache_hits.get("generation", 0)
+    provenance["generation_real_calls"] = provenance["generation_calls"] - provenance["generation_cache_hits"]
+    provenance["fully_cached_query_ids"] = fully_cached_query_ids
     provenance["execution_time_seconds"] = round(time.perf_counter() - start_time, 3)
+    wall_clock_end = datetime.now(timezone.utc)
+    provenance["wall_clock_end"] = wall_clock_end.isoformat()
+    provenance["wall_clock_elapsed_seconds"] = round(
+        (wall_clock_end - wall_clock_start).total_seconds(), 3
+    )
     for row in results:
         row["provenance_model_name"] = provenance["model_name"]
         row["provenance_api_calls"] = provenance["api_calls"]

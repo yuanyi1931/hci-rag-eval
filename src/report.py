@@ -39,6 +39,12 @@ def write_summary_report(results: list[dict], root: str | Path = ".", provenance
         "actionability_calls": 0,
         "execution_time_seconds": 0.0,
         "config_hash": "unknown",
+        "generation_cache_hits": 0,
+        "generation_real_calls": 0,
+        "fully_cached_query_ids": [],
+        "wall_clock_start": None,
+        "wall_clock_end": None,
+        "wall_clock_elapsed_seconds": None,
     }
 
     df = pd.DataFrame(results)
@@ -83,6 +89,43 @@ def write_summary_report(results: list[dict], root: str | Path = ".", provenance
     mean_reliability = _safe_mean(df['reliability_score']) if not df.empty else 0.0
     mean_actionability = _safe_mean(df['actionability_mean']) if not df.empty else 0.0
 
+    generation_calls = provenance.get("generation_calls", 0)
+    generation_cache_hits = provenance.get("generation_cache_hits", 0)
+    generation_real_calls = provenance.get("generation_real_calls", generation_calls - generation_cache_hits)
+    fully_cached_query_ids = provenance.get("fully_cached_query_ids") or []
+
+    cache_lines = [
+        f"- Generation calls (total invocations): {generation_calls}",
+        f"- Generation calls served from cache: {generation_cache_hits}",
+        f"- Generation calls newly made via API: {generation_real_calls}",
+    ]
+    if fully_cached_query_ids:
+        qid_list = ", ".join(str(q) for q in fully_cached_query_ids)
+        cache_lines.append(
+            f"- Query IDs fully served from a previous run's cache: {qid_list} "
+            "(these results came from an earlier run, not newly generated this time)"
+        )
+    else:
+        cache_lines.append("- Query IDs fully served from a previous run's cache: none")
+
+    execution_time_seconds = provenance.get("execution_time_seconds", 0.0) or 0.0
+    wall_clock_elapsed_seconds = provenance.get("wall_clock_elapsed_seconds")
+    timing_lines = [
+        f"- Execution time, active (s): {execution_time_seconds}",
+        f"- Wall-clock start: {provenance.get('wall_clock_start', 'n/a')}",
+        f"- Wall-clock end: {provenance.get('wall_clock_end', 'n/a')}",
+        f"- Wall-clock elapsed (s): {wall_clock_elapsed_seconds if wall_clock_elapsed_seconds is not None else 'n/a'}",
+    ]
+    if wall_clock_elapsed_seconds is not None and execution_time_seconds > 0:
+        deviation = abs(wall_clock_elapsed_seconds - execution_time_seconds) / execution_time_seconds
+        if deviation > 0.20:
+            timing_lines.append(
+                f"- WARNING: wall-clock elapsed time differs from active execution time by "
+                f"{deviation * 100:.0f}%. This can happen if the process was suspended (e.g. system "
+                "sleep) during a long unattended run; 'active' execution time excludes suspended "
+                "time and may understate the true duration."
+            )
+
     summary_lines = [
         "# HCI RAG Evaluation Summary",
         "",
@@ -97,7 +140,8 @@ def write_summary_report(results: list[dict], root: str | Path = ".", provenance
         f"- Generation calls: {provenance.get('generation_calls', 0)}",
         f"- Validity calls: {provenance.get('validity_calls', 0)}",
         f"- Actionability calls: {provenance.get('actionability_calls', 0)}",
-        f"- Execution time (s): {provenance.get('execution_time_seconds', 0.0)}",
+        *cache_lines,
+        *timing_lines,
         f"- Reused generations file: {provenance.get('reuse_generations', False)}",
         f"- Generations file mtime: {provenance.get('generations_mtime', 'n/a')}",
         f"- Config hash: {provenance.get('config_hash', 'unknown')}",
