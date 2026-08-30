@@ -34,7 +34,7 @@ generation:
   max_tokens: 4096
 
 budget:
-  max_api_calls: 600
+  max_api_calls: 1000
   warn_at_calls: 50
 
 runtime:
