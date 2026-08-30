@@ -95,16 +95,16 @@ def plot_retrieval_vs_grounding(df: pd.DataFrame, output_path: Path) -> None:
 
 def plot_metrics_distribution(df: pd.DataFrame, output_path: Path) -> None:
     metrics = [
-        ("grounding_rate", "Grounding rate"),
-        ("semantic_consistency", "Semantic consistency"),
-        ("claim_jaccard", "Claim Jaccard"),
-        ("actionability_mean", "Actionability (mean)"),
+        ("grounding_rate", "Grounding rate", (0, 1)),
+        ("semantic_consistency", "Semantic consistency", (0, 1)),
+        ("claim_jaccard", "Claim Jaccard", (0, 1)),
+        ("actionability_mean", "Actionability (mean) (1-5 scale)", (1, 5)),
     ]
 
     fig, axes = plt.subplots(2, 2, figsize=(9, 7.5))
     rng = np.random.default_rng(42)
 
-    for ax, (col, label) in zip(axes.flat, metrics):
+    for ax, (col, label, ylim) in zip(axes.flat, metrics):
         values = df[col].to_numpy(dtype=float)
         mean = float(np.mean(values))
         sd = float(np.std(values, ddof=1))
@@ -118,6 +118,7 @@ def plot_metrics_distribution(df: pd.DataFrame, output_path: Path) -> None:
         ax.hlines([mean - sd, mean + sd], 0.15, 0.25, color="#B23A48", linewidth=1.2, zorder=4)
 
         ax.set_xlim(-0.4, 0.4)
+        ax.set_ylim(*ylim)
         ax.set_xticks([])
         ax.set_title(label, fontsize=10)
         ax.text(
