@@ -11,3 +11,5 @@ __pycache__/
 /outputs/*.png
 /outputs/*.jsonl
 !outputs/.gitkeep
+!outputs/figures/
+!outputs/figures/*.png
