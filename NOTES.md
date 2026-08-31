@@ -313,3 +313,25 @@ The only Phase 3 5×5 numbers that survive are the ones already embedded in this
 This is the same class of data-integrity failure already recorded twice in this document: §9 (the test suite silently overwriting production `outputs/generations.jsonl` because no path redirection was wired in) and the smoke-test overwrite of `outputs/report.md` noted when archiving Phase 4. In all three cases, a regenerable working artifact was treated, even briefly, as if it were durable, and got silently clobbered by a later, unrelated execution.
 
 Lesson: experiment outputs should be archived immediately after the run that produced them, not deferred until the numbers are needed for a report. `outputs/` must be treated as scratch space that any run can and will overwrite; anything meant to be cited later needs to be copied out of it before the next invocation of the pipeline, not after.
+
+## 18. Design decisions from the original specification (PROMPT.md) not carried into the implementation or documented elsewhere
+
+`PROMPT.md`, the original Chinese-language project specification given to build this pipeline, was removed from the repository once it was confirmed to be superseded by the actual implementation (documented throughout this file) and by `README.md`. Its content was checked against both before removal. Two design decisions and one piece of stated rationale from that specification were not otherwise recorded anywhere, and are preserved here.
+
+**Two query-source modes were designed, but only one was built.** The specification called for a config-switchable `query_mode` with two options: `held_out` (randomly sample a subset of the corpus to serve as queries, and exclude those same papers from the retrieval pool, so a query cannot trivially retrieve itself) and `manual` (a fixed list of hand-written topic sentences, specified as the default). Only `manual` was ever implemented — `config.yaml` has no `query_mode` field at all, and `src/retrieve.py` contains no pool-exclusion logic for held-out queries. The held-out mode was dropped at some point during implementation without this simplification being recorded as a deliberate decision anywhere else.
+
+**The 3–5 insight range per generation was chosen for cross-run comparability.** `generate.py`'s prompt requires `'insights' must be a list of 3-5 objects`, matching the original specification. The rationale given in the specification, not restated anywhere else in this project: requesting a roughly fixed number of insights per run is intended to make cross-run comparison easier, since the reliability metrics (semantic consistency, claim-level Jaccard overlap, confidence ICC) all compare the insights produced by different reruns of the same query against each other.
+
+**The actionability rubric's original 5-point wording was condensed before it reached the judge prompt.** The specification's rubric was:
+
+| Score | Definition |
+|---|---|
+| 1 | Purely descriptive — restates what the paper does, with no way to act on it |
+| 2 | Points to a general direction, but not concrete enough to plan around |
+| 3 | Points to an identifiable research gap or design direction, but still needs substantial elaboration to execute |
+| 4 | Concrete enough to become a research question or design decision, needing only minor refinement |
+| 5 | Concrete enough to write directly into a research design, experiment plan, or product spec |
+
+The judge prompt actually implemented in `evaluate_actionability.py` uses a condensed one-line version of the same five levels (`1 = purely descriptive; 2 = vague direction; 3 = identifiable direction; 4 = actionable decision; 5 = very operational with clear next steps`). Neither `README.md` nor the rest of this file previously recorded the original, more detailed rubric wording that the condensed version was derived from.
+
+Everything else in the specification — the tech stack, project layout, phased build order, the per-module implementation details for `fetch_data.py`/`embed.py`, the cost-control and caching design, the two-layer validity design, the three-level reliability design, and the experiment-level (not per-query) ICC design — is already documented in this file and/or `README.md`, in most cases in more detail and with corrective history that the original specification, written before implementation, could not have contained.
