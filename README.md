@@ -1,201 +1,139 @@
-# HCI RAG Eval
+# hci-rag-eval
 
-A compact Retrieval-Augmented Generation evaluation project for HCI literature. The project focuses on measuring the relationship between retrieval quality and generated output quality, with emphasis on:
+**Does better retrieval produce better-grounded generation? In this setup, the answer is: not measurably.**
 
-- validity (grounding / faithfulness)
-- reliability (consistency across repeated generations)
-- actionability (how usable the insight is in research or product decisions)
+A small retrieval-augmented generation (RAG) pipeline over HCI paper abstracts, built to quantify the **validity**, **reliability**, and **actionability** of LLM-generated research insights — and to test whether retrieval quality predicts generation quality.
 
-## Project structure
+The retrieval layer is deliberately simple (sentence embeddings + cosine similarity). The evaluation layer is where the work is.
 
-```text
-hci-rag-eval/
-├── README.md
-├── requirements.txt
-├── config.yaml
-├── .gitignore
-├── main.py
-├── data/
-│   ├── raw/
-│   │   ├── sample_abstracts.jsonl
-│   │   └── abstracts.jsonl
-│   ├── embeddings.npy
-│   └── embeddings_ids.json
-├── src/
-│   ├── __init__.py
-│   ├── fetch_data.py
-│   ├── embed.py
-│   ├── retrieve.py
-│   ├── generate.py
-│   ├── evaluate_validity.py
-│   ├── evaluate_reliability.py
-│   ├── evaluate_actionability.py
-│   └── report.py
-├── notebooks/
-│   └── analysis.ipynb
-├── outputs/
-│   ├── results.csv
-│   ├── manual_actionability_template.csv
-│   ├── retrieval_vs_grounding.png
-│   └── report.md
-└── .venv/
-```
+---
 
-## Setup
+## Main result
+
+Across 10 queries × 5 reruns (50 generation attempts, 49 usable after one parse failure; 706 API calls), retrieval similarity showed **no reliable relationship** with any generation-quality metric:
+
+| Metric | Pearson r | p | n |
+|---|---|---|---|
+| grounding rate | +0.222 | 0.537 | 10 |
+| semantic consistency | +0.410 | 0.240 | 10 |
+| claim overlap (Jaccard) | +0.239 | 0.506 | 10 |
+| actionability | +0.128 | 0.724 | 10 |
+
+![Retrieval similarity vs grounding rate](outputs/figures/retrieval_vs_grounding.png)
+
+The direction was **not stable across sample sizes**: an earlier 5-query run gave r = −0.147, and a 3-query pilot pointed negative as well (both from development notes, [NOTES.md](NOTES.md) §13 — not archived experiment runs). Three runs, three inconsistent directions, none significant.
+
+**This is reported as a negative result, not a trend.** A likely design limitation: the observed range of retrieval similarity was narrow (0.197–0.388, sd = 0.065). Testing this hypothesis properly would require deliberately constructing query sets with a wider spread in retrieval quality.
+
+---
+
+## Secondary finding: citation hallucinations are near-miss ID confusions
+
+Three of the ten queries produced at least one citation to a paper ID that was **not** in the retrieved context. All three were single-character confusions with a real neighbouring ID — **none were fabricated from nothing**:
+
+| Type | Model output | Actual ID in context |
+|---|---|---|
+| Digit swap | 2008.**035**82v1 | 2008.**025**82v1 |
+| Version suffix | 2006.00372**v1** | 2006.00372**v2** |
+| Year prefix | **2005**.02582v1 | **2008**.02582v1 |
+
+The structure of arXiv IDs (`YYMM.NNNNNvV`) makes single-position errors easy to produce and hard to spot: the output is **syntactically valid**, so an LLM judge reading it in prose has no obvious signal that anything is wrong.
+
+These were caught by `citation_validity_rate` — a deterministic set-membership check that requires **no API calls at all**. This validates the two-layer validity design: the cheapest layer catches the most easily-missed error class, and the expensive LLM-judge layer is reserved for semantic entailment.
+
+---
+
+## Evaluation design
+
+Three dimensions, each with its own measurement strategy:
+
+**Validity** — two layers.
+1. `citation_validity_rate`: deterministic check that every cited paper ID appears in that run's top-k context. No API cost.
+2. `grounding_rate`: an independent LLM judge decides whether each claim is entailed by the abstracts it cites. Three votes per claim at temperature 0; all votes retained so judge self-consistency can itself be measured.
+
+**Reliability** — same prompt, five reruns, three levels of agreement.
+- Semantic: mean pairwise cosine similarity across runs
+- Content: Jaccard overlap of claims after greedy threshold matching
+- Numeric: Krippendorff's α on citation choices; ICC(2,1) on confidence scores at the **experiment level** (rows = queries, columns = reruns)
+
+**Actionability** — 1–5 rubric, LLM judge, three votes, median. Raw votes retained.
+
+---
+
+## Statistical implementation is verified, not assumed
+
+`src/stats.py` implements ICC(2,1), Krippendorff's α, Cohen's κ, and Jaccard similarity from the formulas rather than calling a black box. Every expected value in the test suite traces to a source outside this project:
+
+| Test | Expected value from |
+|---|---|
+| ICC(2,1) = 0.290 | Shrout & Fleiss (1979), Table 1 |
+| ICC(2,1) cross-check | `pingouin.intraclass_corr` (ICC(A,1)) |
+| Cohen's κ = 0.40 | Documented hand calculation in the test |
+| Jaccard = 0.5 | Documented hand calculation in the test |
+| Boundary cases | Formula convergence properties |
+
+This mattered. An early version of `icc_2_1` had an axis inconsistency that produced **0.161** and **0.743** on the benchmark matrix depending on input orientation — both plausible-looking numbers that happen to correspond to *different ICC variants* (ICC(1,1) and ICC(C,1)). It did not raise; it silently answered a different statistical question.
+
+**[`NOTES.md`](NOTES.md) documents this and sixteen other findings** from building the pipeline — the bugs, how each was caught, and what they imply about trusting fluent-looking output. It is the most substantive part of this repository.
+
+---
+
+## Running it
 
 ```bash
-cd /path/to/hci-rag-eval
-python3 -m venv .venv
-source .venv/bin/activate
+python3.12 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
+echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
+
+python main.py --queries 10 --reruns 5
 ```
 
-Use the project virtual environment for all tests and Python entrypoints. In particular, run:
+Tests (must use the venv interpreter — a system `pytest` will silently use the wrong environment):
 
 ```bash
-.venv/bin/python -m pytest
+.venv/bin/python -m pytest tests/ -v    # 39 tests
 ```
 
-This avoids accidentally picking up the system or Anaconda `pytest`, which can resolve to a different environment and produce confusing failures.
-
-Set your Anthropic API key:
+Reuse existing generations to re-run only the evaluation stages:
 
 ```bash
-export ANTHROPIC_API_KEY="your_api_key_here"
+python main.py --reuse-generations
 ```
 
-On Windows PowerShell:
+**Cost and time.** The full 10×5 run made 706 API calls for **$1.22**. Wall-clock time was ~6.5 hours because the machine slept mid-run; active compute time was 44.8 minutes. Use `caffeinate -i` for unattended runs — the pipeline now reports both figures and warns when they diverge.
 
-```powershell
-$env:ANTHROPIC_API_KEY="your_api_key_here"
+All parameters live in `config.yaml`. `budget.max_api_calls` is a hard ceiling that aborts the run rather than a soft warning.
+
+---
+
+## Limitations
+
+- **n = 10 queries.** No correlation could reach significance at this sample size regardless of effect.
+- **Narrow retrieval-quality range.** Similarity spanned 0.197–0.388; this may be too little variation to detect an effect even if one exists.
+- **Single model, single domain.** All generation and judging used one model on `cs.HC` abstracts.
+- **LLM-as-judge is unvalidated against humans.** The pipeline exports `validity_for_human_review.csv` for manual annotation, and Cohen's κ against those labels is implemented and tested — but the human annotation has not been done. Grounding rates should be read as *this judge's* assessment, not ground truth.
+- **Confidence scores show little spread.** Per-query standard deviations of the model's self-reported confidence were small (mean sd across queries well under 0.05), limiting what ICC on that field can detect.
+
+---
+
+## Layout
+
+```
+src/stats.py                 ICC, Krippendorff's α, Cohen's κ, Jaccard
+src/retrieve.py              Embedding retrieval + quality metrics
+src/generate.py              Structured generation with rerun support
+src/evaluate_validity.py     Citation check + LLM-judge grounding
+src/evaluate_reliability.py  Three-level agreement measurement
+src/evaluate_actionability.py  Rubric scoring
+src/llm_client.py            Call counter, budget ceiling, cache
+tests/                       39 tests
+NOTES.md                     Methodological record
 ```
 
-## Run the pipeline
-
-Run the default demo version (small, fast, no need to fetch the full arXiv corpus):
-
-```bash
-python main.py --demo
-```
-
-Run a lightweight real pipeline:
-
-```bash
-python main.py --max-papers 50 --queries 3 --reruns 3 --top-k 5
-```
-
-Run the full pipeline with a fetch + embed + retrieval + generation + evaluation flow:
-
-```bash
-python main.py --max-papers 100 --queries 5 --reruns 5 --top-k 5
-```
-
-## Notes
-
-- `fetch_data.py` attempts to fetch arXiv `cs.HC` abstracts through the public API.
-- `generate.py` is designed to rerun the same prompt multiple times so that reliability can be measured.
-- If no Anthropic API key is configured, the generation step falls back to a deterministic demo output so the repo remains runnable for local testing and validation.
-- The project keeps the evaluation logic explicit and interpretable, with formulas noted in code comments for later reporting or paper writing.
-
-## Expected runtime
-
-- Demo mode: a few seconds
-- Small prototype: 1–5 minutes depending on model availability and network latency
-- Larger full runs: can take longer because of repeated generation calls and embedding model download
-
-## Phase 4 API call estimate
-
-The earlier estimate undercounted the cost because the project does not judge a whole generation once; it judges each claim and each insight separately.
-
-### 1) What actually gets judged?
-
-- Generation: the model produces one JSON response per run. In the prompt, each response contains 3–5 insights, and each insight contains a claim. The project therefore treats each run as a bundle of multiple unit-level judgments.
-- Claim grounding: per PROMPT.md §4.5, the LLM judge evaluates each claim separately against the retrieved source text. This is an API call, because the judge is an independent model pass.
-- Actionability: per PROMPT.md §4.7, the LLM judge scores each insight separately, and also emits a reason. This is another API call per insight.
-- Claim extraction step: the project does not call the API to split claims. It is a local parse step on the structured JSON generated by the model. In other words, we read `output["insights"]`, iterate each item, and convert each `claim` string into a unit for validity evaluation. This is rule-based logic, not an Anthropic call.
-
-### 2) Correct estimate for the current config
-
-Assume the default generation output contains about 4 claims and 4 insights per run, which matches the project prompt requirement of 3–5 insights and typical claim count after parsing.
-
-- Generation: 10 queries × 5 runs = 50 API calls
-- Validity judge: 50 generations × 4 claims × 3 votes = 600 API calls
-- Actionability judge: 50 generations × 4 insights × 3 votes = 600 API calls
-- Total estimated Phase 4 cost: 50 + 600 + 600 = 1,250 API calls
-
-This is the correct full-run estimate for the default configuration and is the reason the hard budget must stay conservative during smoke testing.
-
-### 3) Token and cost estimate
-
-A rough operating estimate for Sonnet pricing is:
-
-- Generation input: about 2,000–3,000 tokens per call (top-5 abstract context)
-- Judge input: about 500–800 tokens per claim or insight judgment
-- Generation output: roughly a few hundred tokens per response
-- Judge output: small, usually a few dozen tokens for a verdict and reason
-
-Using public Sonnet pricing as a rough guide:
-
-- Input: about $3 per 1M tokens
-- Output: about $15 per 1M tokens
-
-A simple back-of-the-envelope for the full run:
-
-- Generation: 50 calls × (2.5k input + 0.5k output) tokens ≈ 150k input + 25k output tokens
-- Validity judge: 600 calls × (700 input + 100 output) tokens ≈ 420k input + 60k output tokens
-- Actionability judge: 600 calls × (700 input + 100 output) tokens ≈ 420k input + 60k output tokens
-
-Total approximate usage:
-
-- Input: about 990k tokens
-- Output: about 145k tokens
-
-Estimated cost:
-
-- Input cost ≈ 990k / 1,000,000 × $3 = about $2.97
-- Output cost ≈ 145k / 1,000,000 × $15 = about $2.18
-- Total ≈ $5.15 per full 10-query × 5-run Phase 4 run
-
-This is only a rough estimate; real usage varies with prompt length, model version, retries, and any additional rubric explanations. The cost is still low in absolute terms, but the call count is the relevant limiting factor because this project is intentionally budgeted by request count rather than raw token volume.
-
-### 4) Decision record: keep 3 votes, do not reduce to 1
-
-We considered reducing `judge_n_votes` from 3 to 1 to save roughly 2/3 of the judge-side call volume. We decided not to do that.
-
-The reason is methodological, not financial. The project is explicitly about measuring the reliability of LLM output. The judge itself is an LLM, and if the same claim or insight receives different labels across three judge passes, then the downstream grounding rate or actionability score should be discounted accordingly. In other words, judge disagreement is not noise to discard; it is a signal about uncertainty and model instability.
-
-This is also valuable for the report: it gives us a direct way to report judge self-consistency in the limitations section, instead of pretending the judge was perfectly stable. A single-vote judge would hide that uncertainty and make the reported grounding numbers look cleaner than they are.
-
-The actual limiting factor is the safety valve `max_api_calls`, not the raw cost. The project is budgeted per API request, and the guardrail is what keeps a smoke test from outrunning the budget. The cost itself is still manageable in the current configuration; the real issue is keeping the study disciplined enough to remain within a bounded evaluation budget.
-
-### 5) Cost-reduction options
-
-If you want to lower cost before running a full evaluation, these are the main levers:
-
-1. `judge_n_votes: 3` -> `1`
-   - Pros: cuts judge cost by 3×.
-   - Tradeoff: you lose the judge self-consistency signal and majority-vote robustness. The verdict becomes noisier and more sensitive to a single judge opinion.
-
-2. Only score a random subset of actionability items
-   - Pros: reduces actionability judge volume substantially, especially in large studies.
-   - Tradeoff: you lose coverage and may under-sample rare but important insights. The actionability estimate becomes less representative.
-
-3. Reduce `queries` or `reruns`
-   - Pros: directly reduces generation, validity, and actionability call counts linearly.
-   - Tradeoff: you get less statistical power and weaker reliability estimates. Smaller samples make it harder to compare conditions or report stable effects.
-
-4. Keep `judge_n_votes` at 3 but shrink the set of claims/insights examined
-   - Pros: preserves better judge quality while reducing workload.
-   - Tradeoff: you may ignore lower-priority claims or only evaluate a subset of the generated content.
-
-### 5) Budget policy
-
-The project intentionally keeps `budget.max_api_calls: 100` unchanged for now. The intention is a smoke-test guard, not a production ceiling. After a 3-query × 3-run smoke test, we should inspect the real per-stage usage and then choose the formal long-run budget based on observed counts.
-
-This keeps the development loop safe while still giving you a data-driven basis for the final cap.
+---
 
 ## Useful extensions
 
-- replace the default `all-MiniLM-L6-v2` embedding model with another sentence-transformer model
-- compare LLM-as-judge vs a lightweight NLI model for grounding
-- add more queries and measure how retrieval quality correlates with output validity
+- Replace the default `all-MiniLM-L6-v2` embedding model with another sentence-transformer model.
+- Compare LLM-as-judge vs. a lightweight NLI model for grounding.
+- Add more queries and measure how retrieval quality correlates with output validity, with a query set deliberately constructed for wider retrieval-similarity spread.
