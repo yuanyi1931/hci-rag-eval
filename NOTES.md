@@ -2,141 +2,141 @@
 
 This document records the methodological checks and corrective history for the reliability statistics used in this project. It is intended as a neutral technical record for later reporting and method sections. It is written without exaggeration and without omitting the earlier failures and incorrect assumptions.
 
-## 1. ICC(2,1) 軸向錯誤
+## 1. ICC(2,1) axis-orientation bug
 
-原始實作中 `msr` 取自「列之間」，但當時的軸向約定實際上是列 = rater，而不是列 = item/target。結果是，實作計算的是評分者間均方，而不是 Shrout & Fleiss 所定義的受試者間均方。
+In the original implementation, `msr` was computed from "between rows," but the axis convention in effect at the time actually had rows = rater, not rows = item/target. As a result, the implementation computed the between-rater mean square, not the between-subject mean square defined by Shrout & Fleiss.
 
-同時，分母中的 `k`、`n` 也假設了相反方向的軸向約定：同一個函式內同時混用了兩套定義，這會讓輸出在數值上看起來合理，但卻回答錯了問題。
+At the same time, the `k` and `n` in the denominator assumed the opposite axis convention: the same function mixed two different conventions at once, which made the output look numerically reasonable while answering the wrong question.
 
-修正前，對 Shrout & Fleiss (1979) Table 1 的資料輸出為：
+Before the fix, running Shrout & Fleiss (1979) Table 1 data produced:
 
-- 原方向（6 列 target × 4 欄 judge）：0.161
-- 轉置後：0.743
-- 正確值：0.290
+- Original orientation (6 rows target × 4 columns judge): 0.161
+- Transposed: 0.743
+- Correct value: 0.290
 
-對照 pingouin 的完整輸出可知，這兩個錯誤數字分別接近：
+Cross-checking against pingouin's full output shows these two incorrect numbers are each close to:
 
 - `ICC(1,1) = 0.166`
 - `ICC(C,1) = 0.715`
 
-也就是說，錯誤實作並非產生亂數，而是計算了另一種 ICC 變體。數值落在合理範圍內，但回答的是不同的統計問題。這類錯誤不會被「結果看起來合理」的檢查攔截。
+In other words, the faulty implementation was not producing random numbers — it was computing a different ICC variant. The values fell within a plausible range, but answered a different statistical question. This class of bug is not caught by a "does the result look reasonable" check.
 
-修正方式：統一為列 = items/targets、欄 = raters，並在 docstring 明示這個約定，以避免軸向混用。
+Fix: standardized on rows = items/targets, columns = raters, and stated this convention explicitly in the docstring to prevent axis mixing.
 
-## 2. Early return 使測試失去驗證力
+## 2. Early return caused tests to lose their verification power
 
-`icc_2_1` 與 `krippendorff_alpha` 原本在函式開頭都有 perfect-agreement 捷徑。
+`icc_2_1` and `krippendorff_alpha` originally both had a perfect-agreement shortcut at the top of the function.
 
-這兩個對應的測試使用完全一致的資料，因此直接命中捷徑並回傳 `1.0`，公式本體從未被執行。測試通過，但沒有驗證任何東西。
+The two corresponding tests used perfectly identical data, so they hit the shortcut directly and returned `1.0`; the formula body itself was never executed. The tests passed, but they did not verify anything.
 
-經推導，兩個捷徑皆為冗餘：
+On derivation, both shortcuts turned out to be redundant:
 
-- ICC：當每列常數時，`ss_error = 0` 且 `ss_cols = 0`，所以 `mse = 0`、`msc = 0`，分子與分母同時收斂為 `msr`，結果為 `1.0`。
-- Krippendorff：當沒有 mismatch 時，`D_o = 0`，因此 `alpha = 1`。
+- ICC: when every row is constant, `ss_error = 0` and `ss_cols = 0`, so `mse = 0` and `msc = 0`, and the numerator and denominator both converge to `msr`, giving a result of `1.0`.
+- Krippendorff: when there is no mismatch, `D_o = 0`, so `alpha = 1`.
 
-移除捷徑後，原測試改名為 `*_formula_converges_to_one`，現在確實驗證公式在邊界條件下的收斂行為，而不是繞過公式。
+After removing the shortcuts, the original tests were renamed to `*_formula_converges_to_one`, and now genuinely verify the formula's convergence behavior at the boundary condition, instead of bypassing the formula.
 
-## 3. Krippendorff's alpha 缺少有限樣本修正
+## 3. Krippendorff's alpha was missing the finite-sample correction
 
-原實作的期望不一致度使用：
+The original implementation's expected disagreement used:
 
 - `1 - Σ(n_c / n)^2`
 
-但 Krippendorff (2004) 的定義為：
+But Krippendorff (2004)'s definition is:
 
 - `(n^2 - Σ n_c^2) / (n(n - 1))`
 
-缺少 `(n - 1)` 修正時，該指標實際上更接近 Scott's pi，且會系統性低估 alpha。這不是微小差異，而是定義層級上的偏差。
+Without the `(n - 1)` correction, the metric is actually closer to Scott's pi, and systematically underestimates alpha. This is not a minor difference — it is a deviation at the level of the definition itself.
 
-原本的 docstring 宣稱依據 Krippendorff (2004)，但實作與該定義並不一致；這個不一致在驗證階段被確認並修正。
+The original docstring claimed to follow Krippendorff (2004), but the implementation did not match that definition; this inconsistency was identified and fixed during validation.
 
-## 4. ICC 命名法對照
+## 4. ICC naming convention cross-reference
 
-本專案採用 Shrout & Fleiss (1979) 的命名；`pingouin` 則採用 McGraw & Wong (1996) 的命名：
+This project uses Shrout & Fleiss (1979) naming; `pingouin` uses McGraw & Wong (1996) naming instead:
 
-| Shrout & Fleiss | McGraw & Wong / pingouin | 模型 |
+| Shrout & Fleiss | McGraw & Wong / pingouin | Model |
 |---|---|---|
-| ICC(1,1) | ICC(1,1) | 單向隨機效應 |
-| ICC(2,1) | ICC(A,1) | 雙向隨機效應，絕對一致 |
-| ICC(3,1) | ICC(C,1) | 雙向混合效應，一致性 |
+| ICC(1,1) | ICC(1,1) | One-way random effects |
+| ICC(2,1) | ICC(A,1) | Two-way random effects, absolute agreement |
+| ICC(3,1) | ICC(C,1) | Two-way mixed effects, consistency |
 
-本專案選用 `ICC(2,1)` / `ICC(A,1)` 的理由如下：
+The rationale for choosing `ICC(2,1)` / `ICC(A,1)` in this project is as follows:
 
-- 本專案中的 reliability 分析衡量的是同一 prompt 在多次生成之間的數值一致性，而不是僅僅維持排序一致。
-- 生成結果被視為一位「評分者」的評分；這些「評分者」是從所有可能生成結果之中抽樣出的隨機來源，而不是固定的特定評分者。
-- 我們關心的是數值本身是否一致（absolute agreement），而非只要求排名一致（consistency）。
-- 若兩位評分者給出不同的絕對分數，即使排序一致，仍然代表不同的 measurement outcome；這在生成品質評估中是有意義的差異。
+- The reliability analysis in this project measures numeric consistency across multiple generations of the same prompt, not merely rank-order consistency.
+- Each generation output is treated as the "rating" of one rater; these "raters" are random sources sampled from all possible generation outputs, not fixed, specific raters.
+- What we care about is whether the numeric values themselves agree (absolute agreement), not merely whether the ranking agrees (consistency).
+- If two raters give different absolute scores, even with the same ranking, that still represents a different measurement outcome; this is a meaningful difference for evaluating generation quality.
 
-因此，對本專案而言，`ICC(2,1)` / `ICC(A,1)` 是更符合研究問題的選擇。
+Therefore, for this project, `ICC(2,1)` / `ICC(A,1)` is the choice that better fits the research question.
 
-## 5. Cohen's kappa 預期值的來源問題
+## 5. Cohen's kappa expected-value source problem
 
-測試中的預期值 `0.40` 一度被標註為 Cohen (1960) 的 worked example，但無法核實對應的頁碼、表格與混淆矩陣。Cohen (1960) 的主要 worked example 常見計算結果為 `0.492`，而 `0.40` 在 Landis & Koch (1977) 的解釋量表中接近 moderate agreement 的下界 `0.41`，因此推測為兩者混淆。
+The expected value `0.40` in the test was at one point labeled as Cohen (1960)'s worked example, but the corresponding page, table, and confusion matrix could not be verified. Cohen (1960)'s main worked example commonly produces a result of `0.492`, while `0.40` is close to the lower bound of moderate agreement (`0.41`) in the Landis & Koch (1977) interpretation scale, so it is suspected the two were confused.
 
-這個錯誤已被修正：不再宣稱它來自 Cohen (1960) 的文獻範例，而改成明確標示的手算範例。
+This error has been fixed: it is no longer claimed to come from Cohen (1960)'s literature example, and is instead labeled explicitly as a hand-calculated example.
 
-目前使用的 2×2 矩陣為：
+The 2×2 matrix currently used is:
 
 [[4, 1], [2, 3]]
 
-其中：
+Where:
 
 - yes/yes = 4
 - yes/no = 1
 - no/yes = 2
 - no/no = 3
 
-對應手算如下：
+The corresponding hand calculation is:
 
 - `p_o = (4 + 3) / 10 = 0.70`
 - `p_e = ((5/10) * (6/10)) + ((5/10) * (4/10)) = 0.50`
 - `kappa = (p_o - p_e) / (1 - p_e) = (0.70 - 0.50) / (1.00 - 0.50) = 0.40`
 
-此版本明確標註為 hand calculation，而非文獻引用，讓讀者可以自行驗算，且不會誤導成「有文獻依據」的數值。
+This version is explicitly labeled as a hand calculation rather than a literature citation, so readers can verify the arithmetic themselves and are not misled into thinking the value has literature backing.
 
-## 6. 現行測試覆蓋與來源
+## 6. Current test coverage and sources
 
-目前的測試共有 10 個，依來源類型整理如下：
+There are currently 10 tests, organized by source type as follows:
 
-1. `test_icc_2_1_shrout_fleiss_1979_table_1` — 發表文獻（Shrout & Fleiss Table 1）
-2. `test_icc_2_1_perfect_agreement_formula_converges_to_one` — 公式性質（邊界條件）
-3. `test_icc_2_1_random_like_data_near_zero` — 公式性質 / sanity check
-4. `test_icc_2_1_matches_pingouin_intraclass_corr` — 獨立套件交叉驗證
-5. `test_krippendorff_alpha_perfect_agreement_formula_converges_to_one` — 公式性質（邊界條件）
-6. `test_krippendorff_alpha_random_like_data_near_zero` — 公式性質 / sanity check
-7. `test_jaccard_similarity_hand_calculated` — 手算推導
-8. `test_krippendorff_alpha_level_not_nominal_raises` — 規格限制 / 不支援情境
-9. `test_krippendorff_alpha_shape_error_message_is_generic` — 驗證行為 / 輸入格式檢查
-10. `test_cohens_kappa_hand_calculation_example` — 手算推導（明確矩陣與算式）
+1. `test_icc_2_1_shrout_fleiss_1979_table_1` — published literature (Shrout & Fleiss Table 1)
+2. `test_icc_2_1_perfect_agreement_formula_converges_to_one` — formula property (boundary condition)
+3. `test_icc_2_1_random_like_data_near_zero` — formula property / sanity check
+4. `test_icc_2_1_matches_pingouin_intraclass_corr` — independent-package cross-validation
+5. `test_krippendorff_alpha_perfect_agreement_formula_converges_to_one` — formula property (boundary condition)
+6. `test_krippendorff_alpha_random_like_data_near_zero` — formula property / sanity check
+7. `test_jaccard_similarity_hand_calculated` — hand-calculated derivation
+8. `test_krippendorff_alpha_level_not_nominal_raises` — spec constraint / unsupported case
+9. `test_krippendorff_alpha_shape_error_message_is_generic` — validation behavior / input shape check
+10. `test_cohens_kappa_hand_calculation_example` — hand-calculated derivation (explicit matrix and arithmetic)
 
-這種組合的重要性在於，它不是只依靠單一來源：
+The importance of this combination is that it does not rely on a single source alone:
 
-- 有文獻基準
-- 有獨立實作交叉驗證
-- 有邏輯性質檢查
-- 有手算可驗證
+- there is a literature benchmark
+- there is independent-implementation cross-validation
+- there are logical-property checks
+- there is hand-calculated verifiability
 
-這使得驗證更穩健，且更不容易被單一錯誤假設掩蓋。
+This makes the validation more robust, and less easily masked by a single incorrect assumption.
 
-## 7. 環境注意事項
+## 7. Environment notes
 
-測試必須以 `.venv/bin/python -m pytest` 執行，不能直接用系統或 Anaconda 的 `pytest`。
+Tests must be run with `.venv/bin/python -m pytest`, not directly with the system or Anaconda `pytest`.
 
-系統中的 Anaconda 環境會使 `which pytest` 指向 `/opt/anaconda3/bin/pytest`，從而令 pytest 與被測套件分處不同 interpreter。這種情況下，`pingouin` 交叉驗證可能被無故 skip，且表現出「測試看起來不一致」的假象。這是一個環境錯誤，不是統計錯誤。
+The Anaconda environment on the system makes `which pytest` point to `/opt/anaconda3/bin/pytest`, which puts pytest and the package under test in different interpreters. In this situation, the `pingouin` cross-validation can be skipped for no apparent reason, producing the false appearance that "the tests look inconsistent." This is an environment bug, not a statistical bug.
 
-這個問題在驗證過程中被確認，並且在專案規範中明確要求使用虛擬環境內的 Python 進行測試。
+This issue was identified during validation, and the project convention now explicitly requires running tests with the Python inside the virtual environment.
 
-## 結論
+## Conclusion
 
-本專案的統計模組驗證歷程揭露了幾個真實且關鍵的問題：
+The validation history of this project's statistics module revealed several real and critical problems:
 
-1. ICC 的軸向錯誤改變了統計問題本身。
-2. early return 讓測試無法驗證公式。
-3. Krippendorff alpha 缺少有限樣本修正，定義與實作不一致。
-4. ICC 的命名法需要明確對照，以避免與 pingouin 的輸出混淆。
-5. Cohen's kappa 的來源需要根據文獻與可驗算步驟明確標註，不能用未核實的引用。
+1. The ICC axis-orientation bug changed the statistical question itself.
+2. The early return left the tests unable to verify the formula.
+3. Krippendorff's alpha was missing the finite-sample correction, so the definition and implementation did not match.
+4. ICC naming conventions need to be explicitly cross-mapped, to avoid confusion with pingouin's output.
+5. The source of Cohen's kappa's expected value needs to be labeled explicitly according to the literature and a verifiable calculation, not an unverified citation.
 
-目前的狀態是：經過修正後，統計模組已在正確環境下通過測試，且其驗證記錄足以作為後續研究報告的方法論章節。
+Current status: after the fixes, the statistics module passes its tests in the correct environment, and its validation record is sufficient to serve as the methods section for a later research report.
 
 ## Smoke-test observation (2026-08-28)
 
@@ -251,7 +251,7 @@ Result: **r = -0.147, p = 0.813** (n=5).
 
 This is directionally consistent with the earlier 3×3 smoke-test observation (§ "Smoke-test observation (2026-08-28)": lowest-similarity query had the highest grounding rate there too), but the magnitude is notably weaker than an earlier expectation of `r ≈ -0.35` for this same dataset — that stronger figure is not reproduced by this computation and should not be cited without re-deriving it; `-0.147` is the actual computed value from the current `results.csv`. With `n=5` and `p=0.81`, this is not a statistically significant result and cannot support any causal or even correlational claim on its own.
 
--0.35 這個數字來自對話中未經計算的目視估計,實際計算為 -0.147。這是本專案記錄到的一個案例:看似有據的數值來自不可靠的推導程序,與本研究要量化的 validity 問題同構。
+The figure -0.35 came from an uncalculated visual estimate made during conversation; the actual computed value is -0.147. This is a case recorded in this project where a seemingly well-founded number came from an unreliable derivation process — structurally the same class of validity problem this study is trying to quantify.
 
 One possible (unvalidated) explanation, offered as a hypothesis and not a finding: when retrieved papers are topically similar to each other (high average similarity), the model may tend toward cross-paper synthesis, producing more abstract claims that are harder to attribute to any single source paper and thus harder for the judge to mark as grounded. When retrieved papers are more topically dispersed (low average similarity), the model may be forced to make more paper-by-paper statements that stay closer to each source's original text and are therefore easier to judge as grounded. This has not been tested and should not be treated as established; it is recorded here only as a candidate explanation to investigate if/when the query set is expanded beyond n=5.
 
@@ -278,7 +278,7 @@ The most likely explanation: `main.py` measures duration with `time.perf_counter
 
 This means the "3× deviation" framing given earlier (44.8 min vs 13–15 min estimate) is itself based on an unreliable metric for this particular run — the true wall-clock span was roughly 26–30× the estimate, not 3×, though the *productive* (awake) compute time may genuinely be close to the reported 44.8 minutes. Practical takeaway for scaling: the real bottleneck for long unattended runs on a laptop is **system sleep during background execution**, not API rate limiting. Future large-scale runs should either run on a machine/server that does not sleep, or wrap the invocation with `caffeinate` (macOS) to prevent suspension, and should log a wall-clock start/end timestamp pair (not just monotonic elapsed seconds) so this class of discrepancy is visible without needing to reconstruct it from per-record timestamps after the fact.
 
-## 15. 【相關性的三次結果不一致】
+## 15. [Correlation results are inconsistent across three runs]
 
 Three independent runs at three different scales have now each produced a Pearson correlation between `average_retrieval_similarity` and `grounding_rate`, and the three results disagree in direction and are all statistically non-significant:
 
@@ -292,7 +292,7 @@ All three p-values are far above the conventional 0.05 threshold, and the sign o
 
 Design-limitation caveat: across the 10 queries in the largest run, `average_retrieval_similarity` only ranges from 0.197 to 0.388 (sd = 0.065) — a narrow band that may simply be too small to produce a detectable effect on grounding rate even if a real relationship exists. Properly testing this hypothesis would require deliberately constructing a query set with much larger spread in retrieval quality (e.g. some queries designed to retrieve highly on-topic papers, others designed to retrieve marginally relevant ones), rather than relying on the incidental similarity range that happens to occur across a small set of naturally-chosen queries.
 
-## 16. 【citation hallucination 的三種子類型】
+## 16. [Three subtypes of citation hallucination]
 
 Across n=10 (50 generation records), exactly 3 citation hallucinations were found, and all 3 are **near-neighbor arXiv-id confusions with zero outright fabrications** — in every case the cited id is a real, well-formed arXiv identifier, just not one of the retrieved top-k papers, and it differs from an actually-retrieved id by a single small edit:
 
