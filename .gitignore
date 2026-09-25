@@ -13,3 +13,4 @@ __pycache__/
 !outputs/.gitkeep
 !outputs/figures/
 !outputs/figures/*.png
+PROMPT.md
