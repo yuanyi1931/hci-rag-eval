@@ -292,6 +292,8 @@ All three p-values are far above the conventional 0.05 threshold, and the sign o
 
 Design-limitation caveat: across the 10 queries in the largest run, `average_retrieval_similarity` only ranges from 0.197 to 0.388 (sd = 0.065) — a narrow band that may simply be too small to produce a detectable effect on grounding rate even if a real relationship exists. Properly testing this hypothesis would require deliberately constructing a query set with much larger spread in retrieval quality (e.g. some queries designed to retrieve highly on-topic papers, others designed to retrieve marginally relevant ones), rather than relying on the incidental similarity range that happens to occur across a small set of naturally-chosen queries.
 
+**Correction (independence of runs).** The three runs above are described as independent, but they are not fully so. As recorded in §14, all 25 generation records for queries 1–5 in the 10×5 run were served from the Phase 3 (5×5) cache; only queries 6–10 were newly generated. The 10×5 result is therefore largely the 5×5 data plus five new queries. The sign flip from r = −0.147 to r = +0.222 came from adding those five queries, which illustrates how unstable a correlation is at this sample size, but it should not be described as a replication across independent runs.
+
 ## 16. [Three subtypes of citation hallucination]
 
 Across n=10 (50 generation records), exactly 3 citation hallucinations were found, and all 3 are **near-neighbor arXiv-id confusions with zero outright fabrications** — in every case the cited id is a real, well-formed arXiv identifier, just not one of the retrieved top-k papers, and it differs from an actually-retrieved id by a single small edit:

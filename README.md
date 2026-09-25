@@ -6,6 +6,8 @@ A small retrieval-augmented generation (RAG) pipeline over HCI paper abstracts, 
 
 The retrieval layer is deliberately simple (sentence embeddings + cosine similarity). The evaluation layer is where the work is.
 
+**How this was built.** I conceived and scoped this project as a small feasibility study; the code was implemented with Claude Code, an AI coding assistant. Every statistical component was checked against external sources rather than trusted on sight — [NOTES.md](NOTES.md) records what those checks caught, including errors in the generated code.
+
 ---
 
 ## Main result
@@ -21,9 +23,9 @@ Across 10 queries × 5 reruns (50 generation attempts, 49 usable after one parse
 
 ![Retrieval similarity vs grounding rate](outputs/figures/retrieval_vs_grounding.png)
 
-The direction was **not stable across sample sizes**: an earlier 5-query run gave r = −0.147, and a 3-query pilot pointed negative as well (both from development notes, [NOTES.md](NOTES.md) §13 — not archived experiment runs). Three runs, three inconsistent directions, none significant.
+The direction was **not stable across sample sizes**: an earlier 5-query run gave r = −0.147, and a 3-query pilot pointed negative as well (both from development notes, [NOTES.md](NOTES.md) §13 — not archived experiment runs). These runs are not independent: the 10-query run reused cached generations for its first five queries ([NOTES.md](NOTES.md) §14), so adding five new queries was enough to flip the sign. None of the results is significant.
 
-**This is reported as a negative result, not a trend.** A likely design limitation: the observed range of retrieval similarity was narrow (0.197–0.388, sd = 0.065). Testing this hypothesis properly would require deliberately constructing query sets with a wider spread in retrieval quality.
+**This is reported as a null result, not a trend.** A likely design limitation: the observed range of retrieval similarity was narrow (0.197–0.388, sd = 0.065). Testing this hypothesis properly would require deliberately constructing query sets with a wider spread in retrieval quality.
 
 ---
 
