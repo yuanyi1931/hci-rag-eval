@@ -108,7 +108,38 @@ def _get_judge_n_votes() -> int:
     return configured_votes
 
 
-def _normalize_actionability_vote(value: Any) -> int:
+_SCORE_LABEL_PATTERN = re.compile(r"(?:score|rating|answer)\s*(?:is|:|=)?\s*([1-5])\b")
+# Matches a rubric range being echoed back (e.g. "1 to 5", "1-5", "1\u20135") so it is not
+# mistaken for the intended rating.
+_RANGE_PATTERN = re.compile(r"\b[1-5]\s*(?:-|\u2013|\u2014|to)\s*[1-5]\b")
+# A digit 1-5 not adjacent to another digit (excludes multi-digit numbers like "10").
+_STANDALONE_DIGIT_PATTERN = re.compile(r"(?<!\d)([1-5])(?!\d)")
+
+
+def _parse_actionability_response(content: str) -> int | str:
+    """Extract the intended 1-5 rating from a raw judge response, or "unparseable".
+
+    Preference order: an explicit "score"/"rating"/"answer" label wins outright. Otherwise,
+    any rubric-range mention (e.g. "on a scale of 1 to 5") is stripped before searching for a
+    standalone digit, so the scale description itself is never mistaken for the answer. If no
+    standalone digit remains, or more than one distinct standalone digit remains, the response
+    is ambiguous and reported as "unparseable" rather than guessed.
+    """
+    text = str(content).strip().lower()
+    if not text:
+        return "unparseable"
+    label_match = _SCORE_LABEL_PATTERN.search(text)
+    if label_match:
+        return int(label_match.group(1))
+    cleaned = _RANGE_PATTERN.sub(" ", text)
+    digits = _STANDALONE_DIGIT_PATTERN.findall(cleaned)
+    distinct = set(digits)
+    if len(distinct) == 1:
+        return int(distinct.pop())
+    return "unparseable"
+
+
+def _normalize_actionability_vote(value: Any) -> int | str:
     try:
         score = int(value)
     except (TypeError, ValueError):
@@ -125,19 +156,20 @@ def _normalize_actionability_vote(value: Any) -> int:
             return 4
         if text in {"five", "5"}:
             return 5
-        return 3
+        return _parse_actionability_response(text)
     return max(1, min(5, score))
 
 
-def _majority_score(votes: list[int]) -> tuple[int, float]:
+def _majority_score(votes: list[int | str]) -> tuple[int | str, float]:
     if not votes:
         return 1, 0.0
     counts = Counter(votes)
-    majority_value, majority_count = max(counts.items(), key=lambda item: (item[1], item[0]))
+    # str() tie-break avoids comparing int and str vote labels (e.g. "unparseable") directly.
+    majority_value, majority_count = max(counts.items(), key=lambda item: (item[1], str(item[0])))
     return majority_value, majority_count / len(votes)
 
 
-def _llm_actionability_vote(text: str, vote_index: int) -> int:
+def _llm_actionability_vote(text: str, vote_index: int) -> int | str:
     config = load_config()
     evaluation_cfg = config.get("evaluation", {}) if isinstance(config, dict) else {}
     model_name = str(evaluation_cfg.get("judge_model", "claude-sonnet-4-6"))
@@ -158,10 +190,7 @@ def _llm_actionability_vote(text: str, vote_index: int) -> int:
         stage="actionability",
     )
     content = response.get("content", "") if isinstance(response, dict) else str(response)
-    numeric = re.findall(r"\d+", content)
-    if not numeric:
-        return 3
-    return _normalize_actionability_vote(int(numeric[0]))
+    return _parse_actionability_response(content)
 
 
 def _judge_actionability_item(
@@ -170,7 +199,7 @@ def _judge_actionability_item(
     n_votes: int | None = None,
 ) -> dict[str, Any]:
     vote_count = _get_judge_n_votes() if n_votes is None else max(1, int(n_votes))
-    votes: list[int] = []
+    votes: list[int | str] = []
     if judge_fn is None:
         for vote_index in range(vote_count):
             votes.append(_llm_actionability_vote(text, vote_index=vote_index))
@@ -179,14 +208,20 @@ def _judge_actionability_item(
             vote = judge_fn(text=text)
             votes.append(_normalize_actionability_vote(vote))
 
+    numeric_votes = [vote for vote in votes if isinstance(vote, int)]
     majority_value, judge_consistency = _majority_score(votes)
-    final_score = int(median(votes))
+    # "unparseable" votes are treated as missing for the final score: the median is taken
+    # over numeric votes only. If every vote was unparseable, fall back to the rubric's
+    # neutral midpoint (3) rather than raising, but this is recorded via n_unparseable so
+    # it remains visible to callers rather than silently indistinguishable from a real "3".
+    final_score = int(median(numeric_votes)) if numeric_votes else 3
     return {
         "votes": votes,
         "final_score": final_score,
         "majority_score": majority_value,
         "judge_consistency": judge_consistency,
         "n_votes": len(votes),
+        "n_unparseable": len(votes) - len(numeric_votes),
     }
 
 
@@ -200,8 +235,10 @@ def evaluate_actionability(
     records, parse_failures = _normalize_generated_records(generated_outputs)
 
     scores = []
-    raw_votes: list[list[int]] = []
+    raw_votes: list[list[int | str]] = []
     judge_consistency_values: list[float] = []
+    n_unparseable_votes = 0
+    n_items_no_valid_vote = 0
 
     for output in records:
         for text in _extract_insight_texts(output):
@@ -209,6 +246,9 @@ def evaluate_actionability(
             raw_votes.append(judge_result["votes"])
             judge_consistency_values.append(judge_result["judge_consistency"])
             scores.append(judge_result["final_score"])
+            n_unparseable_votes += judge_result["n_unparseable"]
+            if judge_result["n_unparseable"] == judge_result["n_votes"]:
+                n_items_no_valid_vote += 1
 
     return {
         "scores": scores,
@@ -217,6 +257,8 @@ def evaluate_actionability(
         "judge_consistency_mean": float(mean(judge_consistency_values)) if judge_consistency_values else 0.0,
         "judge_consistency_values": judge_consistency_values,
         "n_parse_failures": parse_failures,
+        "n_unparseable_votes": n_unparseable_votes,
+        "n_items_no_valid_vote": n_items_no_valid_vote,
     }
 
 

@@ -93,22 +93,44 @@ def _get_judge_n_votes() -> int:
     return configured_votes
 
 
+_CONTRADICTED_PATTERN = re.compile(r"\bcontradicted\b|\bcontradiction\b|\brefuted\b")
+_NOT_ENTAILED_PATTERN = re.compile(r"\bnot\s+entailed\b|\bnot\s+supported\b|\bunsupported\b|\bfalse\b")
+# Negative lookbehind excludes "entailed"/"supported" when immediately preceded by "not ",
+# since "not entailed" would otherwise also satisfy a bare \bentailed\b search.
+_ENTAILED_PATTERN = re.compile(r"(?<!not )\bentailed\b|(?<!not )\bsupported\b|\btrue\b")
+
+
+def _clean_judge_text(value: Any) -> str:
+    """Lowercase, collapse whitespace, and strip markdown/punctuation noise (*, _, `, -).
+
+    Stripping '_' and '-' merges "not_entailed", "not-entailed", and "not entailed" into a
+    single "not entailed" form so a single regex handles all three separator styles.
+    """
+    cleaned = str(value).strip().lower().replace("\n", " ")
+    cleaned = re.sub(r"[*_`-]+", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _normalize_validity_vote(value: Any) -> str:
-    normalized = str(value).strip().lower().replace("-", "_")
-    aliases = {
-        "supported": "entailed",
-        "support": "entailed",
-        "entailed": "entailed",
-        "true": "entailed",
-        "not_supported": "not_entailed",
-        "unsupported": "not_entailed",
-        "not_entailed": "not_entailed",
-        "false": "not_entailed",
-        "contradicted": "contradicted",
-        "contradiction": "contradicted",
-        "refuted": "contradicted",
-    }
-    return aliases.get(normalized, normalized)
+    """Search the full (cleaned) judge response for exactly one of the three valid labels.
+
+    Order matters only in the sense that "not entailed" must not also register as a bare
+    "entailed" hit; this is handled by the negative lookbehind in _ENTAILED_PATTERN rather
+    than by an early-return ordering. If no label is found, or more than one distinct label
+    is found (e.g. the response asserts both "entailed" and "contradicted"), the vote is
+    reported as "unparseable" rather than guessed.
+    """
+    cleaned = _clean_judge_text(value)
+    matches: set[str] = set()
+    if _CONTRADICTED_PATTERN.search(cleaned):
+        matches.add("contradicted")
+    if _NOT_ENTAILED_PATTERN.search(cleaned):
+        matches.add("not_entailed")
+    if _ENTAILED_PATTERN.search(cleaned):
+        matches.add("entailed")
+    if len(matches) == 1:
+        return matches.pop()
+    return "unparseable"
 
 
 def _majority_vote(votes: list[str]) -> tuple[str, float]:
@@ -139,7 +161,7 @@ def _llm_validity_vote(claim: str, source_text: str, vote_index: int) -> str:
         stage="validity",
     )
     text = response.get("content", "") if isinstance(response, dict) else str(response)
-    return _normalize_validity_vote(text.strip().lower().replace("\n", " ").split()[0])
+    return _normalize_validity_vote(text)
 
 
 def _judge_validity_claim(

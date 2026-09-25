@@ -337,3 +337,123 @@ Lesson: experiment outputs should be archived immediately after the run that pro
 The judge prompt actually implemented in `evaluate_actionability.py` uses a condensed one-line version of the same five levels (`1 = purely descriptive; 2 = vague direction; 3 = identifiable direction; 4 = actionable decision; 5 = very operational with clear next steps`). Neither `README.md` nor the rest of this file previously recorded the original, more detailed rubric wording that the condensed version was derived from.
 
 Everything else in the specification — the tech stack, project layout, phased build order, the per-module implementation details for `fetch_data.py`/`embed.py`, the cost-control and caching design, the two-layer validity design, the three-level reliability design, and the experiment-level (not per-query) ICC design — is already documented in this file and/or `README.md`, in most cases in more detail and with corrective history that the original specification, written before implementation, could not have contained.
+
+## 19. Judge-vote parser bugs found in a full Phase 4 audit, fixed, and re-parsed from cache (2026-09-25)
+
+A full audit of all 657 validity votes and 657 actionability votes from the Phase 4 (10×5) run
+(read directly from `data/cache/*.json`, which stores each judge call's raw, unprocessed response
+text) found two independent parser bugs. Both are bugs in how a judge's raw text response was
+turned into a structured vote, not in the judge model's underlying judgments, and not in the
+retrieval or generation stages. This section documents the root causes, the fix, and the
+corrected numbers. **All numbers in §13–§16 above are left unchanged**; the corrected numbers
+here supersede them for anything derived from validity/actionability judge votes, and the two
+should be read together, not as a silent replacement.
+
+**Root cause 1 — validity parser (`_normalize_validity_vote` / `_llm_validity_vote`).** The old
+code extracted only the *first whitespace-delimited token* of the judge's raw response
+(`.strip().lower().replace("\n", " ").split()[0]`) before attempting to normalize it against a
+small alias dictionary (`{"supported": "entailed", ...}`). This works only if the judge's very
+first token is exactly one of the expected labels. In practice, under `judge_temperature=0.0`,
+the judge frequently opens its response with a restatement of the task ("The claim states
+that…", "I need to evaluate whether…") rather than leading with the label, so the first token
+was often a stray word like `"the"` or `"i"` — neither a valid label nor a value the alias dict
+recognized. That stray token was then passed through **unchanged** as if it were a valid vote,
+silently corrupting the majority-vote count for that claim with a garbage category that could
+still numerically "win" a plurality against genuine `entailed`/`not_entailed` votes from the
+other two judges in the same 3-vote round.
+
+**Root cause 2 — actionability parser (`_llm_actionability_vote` / `_normalize_actionability_vote`).**
+The old code used `re.findall(r"\d+", content)` and took the first digit sequence found,
+defaulting to `3` if none was found. Auditing all 657 cached actionability responses found this
+was, in this dataset, never actually triggered: every single actionability judge response was
+already a bare `"1"`–`"5"` digit with no surrounding text, so the old digit-extraction path
+happened to work correctly 657/657 times. The bug was real (a response like "On a scale of 1 to
+5, I'd give this a 4" would have incorrectly extracted `1`, the first digit of the rubric
+description, not the intended `4`), but it was never exercised by this particular model/prompt
+combination. This is recorded honestly as a **latent, unobserved bug**, not a bug that changed
+any of the original Phase 4 actionability numbers.
+
+**The fix.** `src/evaluate_validity.py::_normalize_validity_vote` now cleans the *entire* raw
+response (lowercased, markdown/punctuation stripped) and searches it for exactly one of three
+regex-matched label categories (`contradicted`, `not_entailed` — with a negative lookbehind so it
+does not also match the bare word "entailed" inside "not entailed" — and `entailed`). If zero or
+more than one distinct category is found, the vote is now explicitly returned as `"unparseable"`
+rather than silently passed through as an unrecognized token. `src/evaluate_actionability.py`
+gained an equivalent `_parse_actionability_response`: it first checks for an explicit
+"score:"/"rating:"/"answer:" label, then strips rubric-range mentions (e.g. "1 to 5", "1–5")
+before searching for a standalone 1–5 digit, and returns `"unparseable"` if zero or more than one
+distinct standalone digit remains. Both evaluators' majority/median aggregation and top-level
+dicts (`_judge_validity_claim`, `_judge_actionability_item`, `evaluate_actionability`) were
+updated to treat `"unparseable"` as an explicit, countable category (`n_unparseable`,
+`n_unparseable_votes`, `n_items_no_valid_vote`) instead of an invisible failure mode.
+
+**Before/after unparseable counts.**
+
+| Stage | Old parser | New parser |
+|---|---|---|
+| Validity (657 votes) | 158 unparseable (24.05%) | 141 unparseable (21.46%) |
+| Actionability (657 votes) | 0 unparseable (0.00%) | 0 unparseable (0.00%, unchanged) |
+
+The new validity parser recovers exactly 17 of the original 158 unparseable votes (the ones
+whose stray first token was `"the"` (143 cases), `"i"` (14 cases), or a markdown-wrapped
+`"**entailed**"` (1 case) — 158 total, matching exactly) by reading the full response instead of
+only the first token. **The remaining 141 are a genuine, separate limitation, not a remaining
+parser bug**: manual inspection confirms these are judge responses truncated by
+`max_tokens=64` before the judge ever states any label at all (the response spends its entire
+token budget restating the claim and the source text, e.g. "...I can find evidence that ex"
+cut off mid-word) — no regex, however permissive, can recover a label that was never emitted.
+Fixing this class would require raising `max_tokens` for the validity judge call and re-running
+with real API calls, which is out of scope for a pure parser fix and is recorded here as a
+known follow-up, not something this change claims to have solved.
+
+**Claim-level impact.** Of the 219 validity claims (657 votes ÷ 3 votes/claim), the majority
+vote label changed for 52 claims when re-parsed with the new logic (mostly cases where a stray
+`"the"`/`"i"` token had previously tied or beaten a real label in the 3-vote plurality). Of
+those, only **4 claims** had their final `entailed` vs. not-`entailed` boolean (the input to
+`grounding_rate`) actually flip — the rest changed only among the "not entailed" (`not_entailed`
+vs. the old unrecognized-token label) side, which does not affect `grounding_rate`.
+
+**Query-level and aggregate results.** Only 2 of the 10 queries' `grounding_rate` changed (query
+7: 0.826 → 0.870; query 9: 0.280 → 0.400); all other queries, and every query's
+`citation_validity_rate`, `reliability_score`, and `actionability_mean`, are bit-for-bit
+identical to the original archive — exactly as expected, since `reliability_score` does not
+consume judge votes at all, and the actionability numbers were confirmed unaffected by root
+cause 2 (see above).
+
+| Metric | Original (Phase 4, `experiments/phase4_2026-08-29.md`) | Corrected (`experiments/phase4_corrected_2026-09-25.md`) |
+|---|---|---|
+| Mean grounding rate | 0.578 | 0.595 |
+| Mean reliability score | 0.516 | 0.516 |
+| Mean actionability score | 2.470 | 2.470 |
+| Pearson r (avg_retrieval_similarity vs grounding_rate, n=10) | r = +0.222, p = 0.537 | r = +0.137, p = 0.705 |
+
+The corrected correlation is **weaker**, not stronger, than the original — fixing the parser bug
+did not reveal a hidden relationship between retrieval similarity and grounding rate; if
+anything it makes the already-non-significant §15 finding ("no reliable, reproducible
+relationship... at these sample sizes") slightly more non-significant. This should be read
+alongside §15's three-run table (3×3, 5×5, 10×5) as a fourth, corrected data point for the same
+n=10 query set, not as a new independent run.
+
+**Interaction with the §16 citation-hallucination findings.** The 3 documented citation
+hallucinations in §16 are unaffected by this fix: they were caught entirely by the deterministic
+`citation_validity_rate` check (retrieved-id membership), which never calls the LLM judge and
+was never in scope for either parser bug. `citation_validity_rate` is bit-for-bit identical
+between the original and corrected archives for all 10 queries, confirming this directly.
+
+**How the re-parse was performed.** `src/llm_client.py`'s cache stores each judge call's raw
+response `content` verbatim, keyed by `{model, prompt, temperature, run_index}`. Since the fix
+changed only the code that interprets that already-cached text (not the prompts or seeds that
+generate the cache keys), the entire Phase 4 judge-vote dataset could be re-scored by rerunning
+`main.py --reuse-generations` (which reuses `outputs/generations.jsonl` and therefore never calls
+the generation stage) against the existing cache: the run reported `Stage call counts:
+generation=0, validity=657, actionability=657, total=0` and `Stage cache-hit counts:
+generation=0, validity=657, actionability=657` — confirming every vote was re-derived from the
+existing cache at **zero additional API cost**, and that the comparison above is a true
+apples-to-apples re-parse of the identical underlying judge responses, not a new sample.
+
+Lesson: a judge-vote parser that silently passes through or defaults on unrecognized input (as
+both `_normalize_validity_vote` and `_normalize_actionability_vote` originally did) can corrupt
+downstream majority-vote statistics without ever raising an error or appearing in any log. An
+explicit `"unparseable"` sentinel, counted and surfaced rather than silently absorbed into a
+plausible-looking default value, is what made both bugs — and the fact that one of them (root
+cause 2) never actually fired on this dataset — visible and verifiable at all.

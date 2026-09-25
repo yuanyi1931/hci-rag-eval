@@ -16,10 +16,12 @@ Across 10 queries × 5 reruns (50 generation attempts, 49 usable after one parse
 
 | Metric | Pearson r | p | n |
 |---|---|---|---|
-| grounding rate | +0.222 | 0.537 | 10 |
+| grounding rate\* | +0.137 | 0.705 | 10 |
 | semantic consistency | +0.410 | 0.240 | 10 |
 | claim overlap (Jaccard) | +0.239 | 0.506 | 10 |
 | actionability | +0.128 | 0.724 | 10 |
+
+\* Corrected from an original r = +0.222, p = 0.537 after a judge-vote parser bug fix (both figures are non-significant null results either way; see [NOTES.md](NOTES.md) §19).
 
 ![Retrieval similarity vs grounding rate](outputs/figures/retrieval_vs_grounding.png)
 
@@ -114,6 +116,7 @@ All parameters live in `config.yaml`. `budget.max_api_calls` is a hard ceiling t
 - **Narrow retrieval-quality range.** Similarity spanned 0.197–0.388; this may be too little variation to detect an effect even if one exists.
 - **Single model, single domain.** All generation and judging used one model on `cs.HC` abstracts.
 - **LLM-as-judge is unvalidated against humans.** The pipeline exports `validity_for_human_review.csv` for manual annotation, and Cohen's κ against those labels is implemented and tested — but the human annotation has not been done. Grounding rates should be read as *this judge's* assessment, not ground truth.
+- **A `max_tokens=64` truncation limits how many validity judge votes can ever be parsed.** After fixing a judge-vote parsing bug (see [NOTES.md](NOTES.md) §19), 141 of 657 validity votes (21.5%) are still unparseable, not because of a parser defect but because the judge's response is cut off before it ever states a label. Recovering these would require raising `max_tokens` and re-running with real API calls, which has not been done.
 - **Confidence scores show little spread.** Per-query standard deviations of the model's self-reported confidence were small (mean sd across queries well under 0.05), limiting what ICC on that field can detect.
 
 ---
